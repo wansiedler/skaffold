@@ -23,7 +23,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -31,13 +30,14 @@ import (
 	"strings"
 	"sync"
 
-	blackfriday "github.com/russross/blackfriday/v2"
+	"github.com/russross/blackfriday/v2"
+	"github.com/xeipuuv/gojsonschema"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema"
 )
 
 const (
-	version7  = "http://json-schema-org/draft-07/schema#"
+	version7  = "http://json-schema.org/draft-07/schema#"
 	defPrefix = "#/definitions/"
 )
 
@@ -48,7 +48,7 @@ var (
 
 	// patterns for enum-type values
 	enumValuePattern     = "^[ \t]*`(?P<name>[^`]+)`([ \t]*\\(default\\))?: .*$"
-	regexpEnumDefinition = regexp.MustCompile("(?m).*Valid [a-z]+ are((\\n" + enumValuePattern + ")*)")
+	regexpEnumDefinition = regexp.MustCompile("(?m).*Valid [a-z]+ are:?((\\n" + enumValuePattern + ")*)")
 	regexpEnumValues     = regexp.MustCompile("(?m)" + enumValuePattern)
 )
 
@@ -77,8 +77,9 @@ type Definition struct {
 	Examples             []string               `json:"examples,omitempty"`
 	Enum                 []string               `json:"enum,omitempty"`
 
-	inlines []*Definition
-	tags    string
+	inlines  []*Definition
+	tags     string
+	skipTrim bool
 }
 
 func main() {
@@ -92,17 +93,18 @@ type sameErr struct {
 	err  error
 }
 
+// TODO(yuwenma): Generate v2 schemas.
 func generateSchemas(root string, dryRun bool) (bool, error) {
 	var results [](chan sameErr)
-	for range schema.SchemaVersions {
+	for range schema.AllVersions {
 		results = append(results, make(chan sameErr, 1))
 	}
 
 	var wg sync.WaitGroup
-	for i, version := range schema.SchemaVersions {
+	for i, version := range schema.AllVersions {
 		wg.Add(1)
 		go func(i int, version schema.Version) {
-			same, err := generateSchema(root, dryRun, version)
+			same, err := generateV1Schema(root, dryRun, version)
 			results[i] <- sameErr{
 				same: same,
 				err:  err,
@@ -113,7 +115,7 @@ func generateSchemas(root string, dryRun bool) (bool, error) {
 	wg.Wait()
 
 	same := true
-	for i := range schema.SchemaVersions {
+	for i := range schema.AllVersions {
 		result := <-results[i]
 		if result.err != nil {
 			return false, result.err
@@ -125,18 +127,18 @@ func generateSchemas(root string, dryRun bool) (bool, error) {
 	return same, nil
 }
 
-func generateSchema(root string, dryRun bool, version schema.Version) (bool, error) {
+func generateV1Schema(root string, dryRun bool, version schema.Version) (bool, error) {
 	apiVersion := strings.TrimPrefix(version.APIVersion, "skaffold/")
 
 	folder := apiVersion
 	strict := false
-	if version.APIVersion == schema.SchemaVersions[len(schema.SchemaVersions)-1].APIVersion {
-		folder = "latest"
+	if version.APIVersion == schema.AllVersions[len(schema.AllVersions)-1].APIVersion {
+		folder = "latest/"
 		strict = true
 	}
 
 	input := filepath.Join(root, "pkg", "skaffold", "schema", folder, "config.go")
-	output := filepath.Join(root, "docs", "content", "en", "schemas", apiVersion+".json")
+	output := filepath.Join(root, "docs-v2", "content", "en", "schemas", apiVersion+".json")
 
 	generator := schemaGenerator{
 		strict: strict,
@@ -150,7 +152,7 @@ func generateSchema(root string, dryRun bool, version schema.Version) (bool, err
 	var current []byte
 	if _, err := os.Stat(output); err == nil {
 		var err error
-		current, err = ioutil.ReadFile(output)
+		current, err = os.ReadFile(output)
 		if err != nil {
 			return false, fmt.Errorf("unable to read existing schema for version %q: %w", version.APIVersion, err)
 		}
@@ -158,10 +160,10 @@ func generateSchema(root string, dryRun bool, version schema.Version) (bool, err
 		return false, fmt.Errorf("unable to check that file exists %q: %w", output, err)
 	}
 
-	current = bytes.Replace(current, []byte("\r\n"), []byte("\n"), -1)
+	current = bytes.ReplaceAll(current, []byte("\r\n"), []byte("\n"))
 
 	if !dryRun {
-		if err := ioutil.WriteFile(output, buf, os.ModePerm); err != nil {
+		if err := os.WriteFile(output, buf, os.ModePerm); err != nil {
 			return false, fmt.Errorf("unable to write schema %q: %w", output, err)
 		}
 	}
@@ -171,7 +173,7 @@ func generateSchema(root string, dryRun bool, version schema.Version) (bool, err
 }
 
 func yamlFieldName(field *ast.Field) string {
-	tag := strings.Replace(field.Tag.Value, "`", "", -1)
+	tag := strings.ReplaceAll(field.Tag.Value, "`", "")
 	tags := reflect.StructTag(tag)
 	yamlTag := tags.Get("yaml")
 
@@ -232,13 +234,15 @@ func (g *schemaGenerator) newDefinition(name string, t ast.Expr, comment string,
 		def.AdditionalProperties = g.newDefinition("", tt.Value, "", "")
 
 	case *ast.StructType:
+		def.Type = "object"
 		for _, field := range tt.Fields.List {
 			yamlName := yamlFieldName(field)
 
 			if strings.Contains(field.Tag.Value, "inline") {
 				def.PreferredOrder = append(def.PreferredOrder, "<inline>")
 				def.inlines = append(def.inlines, &Definition{
-					Ref: defPrefix + field.Type.(*ast.Ident).Name,
+					Ref:      defPrefix + field.Type.(*ast.Ident).Name,
+					skipTrim: strings.Contains(field.Tag.Value, "skipTrim"),
 				})
 				continue
 			}
@@ -259,11 +263,23 @@ func (g *schemaGenerator) newDefinition(name string, t ast.Expr, comment string,
 			def.Properties[yamlName] = g.newDefinition(field.Names[0].Name, field.Type, field.Doc.Text(), field.Tag.Value)
 			def.AdditionalProperties = false
 		}
+
+	case *ast.SelectorExpr:
+		typeName := tt.Sel.Name
+		if typeName == "IntOrString" {
+			def.AnyOf = []*Definition{
+				{Type: "string"},
+				{Type: "integer"},
+			}
+		}
 	}
 
 	if g.strict && name != "" {
+		if comment == "" {
+			panic(fmt.Sprintf("field %q needs comment (all public fields require comments)", name))
+		}
 		if !strings.HasPrefix(comment, name+" ") {
-			panic(fmt.Sprintf("comment should start with field name on field %s", name))
+			panic(fmt.Sprintf("comment %q should start with field name on field %s", comment, name))
 		}
 	}
 
@@ -278,7 +294,7 @@ func (g *schemaGenerator) newDefinition(name string, t ast.Expr, comment string,
 		}
 	}
 
-	description := strings.TrimSpace(strings.Replace(comment, "\n", " ", -1))
+	description := strings.TrimSpace(strings.ReplaceAll(comment, "\n", " "))
 
 	// Extract default value
 	if m := regexpDefaults.FindStringSubmatch(description); m != nil {
@@ -354,6 +370,9 @@ func (g *schemaGenerator) Apply(inputPath string) ([]byte, error) {
 		}
 
 		for _, inlineStruct := range def.inlines {
+			if inlineStruct.skipTrim {
+				continue
+			}
 			ref := strings.TrimPrefix(inlineStruct.Ref, defPrefix)
 			inlines = append(inlines, ref)
 		}
@@ -435,7 +454,13 @@ func (g *schemaGenerator) Apply(inputPath string) ([]byte, error) {
 	}
 
 	for _, ref := range inlines {
-		delete(definitions, ref)
+		existingDef, ok := definitions[ref]
+		if !ok {
+			continue
+		}
+		if !existingDef.skipTrim {
+			delete(definitions, ref)
+		}
 	}
 
 	schema := Schema{
@@ -449,7 +474,23 @@ func (g *schemaGenerator) Apply(inputPath string) ([]byte, error) {
 		Definitions: definitions,
 	}
 
-	return toJSON(schema)
+	buf, err := toJSON(schema)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := validate(buf); err != nil {
+		return nil, fmt.Errorf("invalid schema generated: %v", err.Error())
+	}
+
+	return buf, nil
+}
+
+// Validate generated schema
+func validate(data []byte) error {
+	schemaLoader := gojsonschema.NewBytesLoader(data)
+	_, err := gojsonschema.NewSchema(schemaLoader)
+	return err
 }
 
 // Make sure HTML description are not encoded

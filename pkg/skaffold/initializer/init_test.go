@@ -23,18 +23,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	initconfig "github.com/GoogleContainerTools/skaffold/pkg/skaffold/initializer/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	initconfig "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/initializer/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestDoInit(t *testing.T) {
 	tests := []struct {
 		name             string
+		shouldSkip       bool
 		dir              string
 		config           initconfig.Config
 		expectedError    string
@@ -83,6 +85,20 @@ func TestDoInit(t *testing.T) {
 				CliArtifacts: []string{
 					`{"builder":"Docker","payload":{"path":"leeroy-app/Dockerfile"},"image":"gcr.io/k8s-skaffold/leeroy-app"}`,
 					`{"builder":"Docker","payload":{"path":"leeroy-web/Dockerfile"},"image":"gcr.io/k8s-skaffold/leeroy-web"}`,
+				},
+				Opts: config.SkaffoldOptions{
+					ConfigurationFile: "skaffold.yaml.out",
+				},
+			},
+		},
+		{
+			name:       "windows paths use forward slashes",
+			shouldSkip: runtime.GOOS != "windows",
+			dir:        `testdata\init\windows`,
+			config: initconfig.Config{
+				Force: true,
+				CliArtifacts: []string{
+					`{"builder":"Docker","context":"apps\\web","payload":{"path":"apps\\web\\build\\Dockerfile"},"image":"gcr.io/k8s-skaffold/leeroy-web"}`,
 				},
 				Opts: config.SkaffoldOptions{
 					ConfigurationFile: "skaffold.yaml.out",
@@ -197,21 +213,23 @@ func TestDoInit(t *testing.T) {
 			},
 		},
 		{
-			name: "helm fails",
-			dir:  "testdata/init/helm-deployment",
+			name:       "helm init",
+			dir:        "testdata/init/helm-deployment",
+			shouldSkip: true, // Github Actions CI runners don't have helm. This test should mock helm.
 			config: initconfig.Config{
+				Force: true,
 				Opts: config.SkaffoldOptions{
 					ConfigurationFile: "skaffold.yaml.out",
 				},
 			},
-			expectedError: `Projects set up to deploy with helm must be manually configured.
-
-See https://skaffold.dev/docs/pipeline-stages/deployers/helm/ for a detailed guide on setting your project up with skaffold.`,
-			expectedExitCode: 1,
 		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.name, func(t *testutil.T) {
+			if test.shouldSkip {
+				t.Logf("Skipped test %q", test.name)
+				return
+			}
 			t.Chdir(test.dir)
 
 			err := DoInit(context.TODO(), os.Stdout, test.config)

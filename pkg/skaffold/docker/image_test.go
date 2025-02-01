@@ -18,19 +18,21 @@ package docker
 
 import (
 	"context"
-	"io/ioutil"
+	"fmt"
+	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
-	"github.com/google/go-containerregistry/pkg/name"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	sErrors "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/errors"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/proto/v1"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestPush(t *testing.T) {
@@ -69,7 +71,7 @@ func TestPush(t *testing.T) {
 			t.Override(&DefaultAuthHelper, testAuthHelper{})
 
 			localDocker := NewLocalDaemon(test.api, nil, false, nil)
-			digest, err := localDocker.Push(context.Background(), ioutil.Discard, test.imageName)
+			digest, err := localDocker.Push(context.Background(), io.Discard, test.imageName)
 
 			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expectedDigest, digest)
 		})
@@ -84,14 +86,14 @@ func TestDoNotPushAlreadyPushed(t *testing.T) {
 		api.Add("image", "sha256:imageIDabcab")
 		localDocker := NewLocalDaemon(api, nil, false, nil)
 
-		digest, err := localDocker.Push(context.Background(), ioutil.Discard, "image")
+		digest, err := localDocker.Push(context.Background(), io.Discard, "image")
 		t.CheckNoError(err)
 		t.CheckDeepEqual("sha256:bb1f952848763dd1f8fcf14231d7a4557775abf3c95e588561bc7a478c94e7e0", digest)
 
 		// Images already pushed don't need being pushed.
 		api.ErrImagePush = true
 
-		digest, err = localDocker.Push(context.Background(), ioutil.Discard, "image")
+		digest, err = localDocker.Push(context.Background(), io.Discard, "image")
 		t.CheckNoError(err)
 		t.CheckDeepEqual("sha256:bb1f952848763dd1f8fcf14231d7a4557775abf3c95e588561bc7a478c94e7e0", digest)
 	})
@@ -105,6 +107,7 @@ func TestBuild(t *testing.T) {
 		workspace     string
 		artifact      *latest.DockerArtifact
 		expected      types.ImageBuildOptions
+		mode          config.RunMode
 		shouldErr     bool
 		expectedError string
 	}{
@@ -117,6 +120,7 @@ func TestBuild(t *testing.T) {
 				Tags:        []string{"finalimage"},
 				AuthConfigs: allAuthConfig,
 			},
+			mode: config.RunModes.Dev,
 		},
 		{
 			description: "build with options",
@@ -129,27 +133,30 @@ func TestBuild(t *testing.T) {
 				DockerfilePath: "Dockerfile",
 				BuildArgs: map[string]*string{
 					"k1": nil,
-					"k2": util.StringPtr("value2"),
-					"k3": util.StringPtr("{{.VALUE3}}"),
+					"k2": util.Ptr("value2"),
+					"k3": util.Ptr("{{.VALUE3}}"),
 				},
 				CacheFrom:   []string{"from-1"},
 				Target:      "target",
 				NetworkMode: "None",
 				NoCache:     true,
+				PullParent:  true,
 			},
+			mode: config.RunModes.Dev,
 			expected: types.ImageBuildOptions{
 				Tags:       []string{"finalimage"},
 				Dockerfile: "Dockerfile",
 				BuildArgs: map[string]*string{
 					"k1": nil,
-					"k2": util.StringPtr("value2"),
-					"k3": util.StringPtr("value3"),
+					"k2": util.Ptr("value2"),
+					"k3": util.Ptr("value3"),
 				},
 				CacheFrom:   []string{"from-1"},
 				AuthConfigs: allAuthConfig,
 				Target:      "target",
 				NetworkMode: "none",
 				NoCache:     true,
+				PullParent:  true,
 			},
 		},
 		{
@@ -157,6 +164,7 @@ func TestBuild(t *testing.T) {
 			api: &testutil.FakeAPIClient{
 				ErrImageBuild: true,
 			},
+			mode:          config.RunModes.Dev,
 			workspace:     ".",
 			artifact:      &latest.DockerArtifact{},
 			shouldErr:     true,
@@ -168,6 +176,7 @@ func TestBuild(t *testing.T) {
 				ErrStream: true,
 			},
 			workspace:     ".",
+			mode:          config.RunModes.Dev,
 			artifact:      &latest.DockerArtifact{},
 			shouldErr:     true,
 			expectedError: "unable to stream build output",
@@ -176,9 +185,10 @@ func TestBuild(t *testing.T) {
 			description: "bad build arg template",
 			artifact: &latest.DockerArtifact{
 				BuildArgs: map[string]*string{
-					"key": util.StringPtr("{{INVALID"),
+					"key": util.Ptr("{{INVALID"),
 				},
 			},
+			mode:          config.RunModes.Dev,
 			shouldErr:     true,
 			expectedError: `function "INVALID" not defined`,
 		},
@@ -186,10 +196,14 @@ func TestBuild(t *testing.T) {
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			t.Override(&DefaultAuthHelper, testAuthHelper{})
+			t.Override(&EvalBuildArgsWithEnv, func(_ config.RunMode, _ string, _ string, args map[string]*string, _ map[string]*string, _ map[string]string) (map[string]*string, error) {
+				return util.EvaluateEnvTemplateMap(args)
+			})
 			t.SetEnvs(test.env)
 
 			localDocker := NewLocalDaemon(test.api, nil, false, nil)
-			_, err := localDocker.Build(context.Background(), ioutil.Discard, test.workspace, test.artifact, "finalimage")
+			opts := BuildOptions{Tag: "finalimage", Mode: test.mode}
+			_, err := localDocker.Build(context.Background(), io.Discard, test.workspace, "final-image", test.artifact, opts)
 
 			if test.shouldErr {
 				t.CheckErrorContains(test.expectedError, err)
@@ -243,6 +257,13 @@ func TestImageID(t *testing.T) {
 			imageID, err := localDocker.ImageID(context.Background(), test.ref)
 
 			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expected, imageID)
+			if test.shouldErr {
+				if e, ok := err.(sErrors.Error); ok {
+					t.CheckDeepEqual(e.StatusCode(), proto.StatusCode_BUILD_DOCKER_GET_DIGEST_ERR)
+				} else {
+					t.Error("expected to be of type actionable err not found")
+				}
+			}
 		})
 	}
 }
@@ -259,9 +280,9 @@ func TestGetBuildArgs(t *testing.T) {
 			description: "build args",
 			artifact: &latest.DockerArtifact{
 				BuildArgs: map[string]*string{
-					"key1": util.StringPtr("value1"),
+					"key1": util.Ptr("value1"),
 					"key2": nil,
-					"key3": util.StringPtr("{{.FOO}}"),
+					"key3": util.Ptr("{{.FOO}}"),
 				},
 			},
 			env:  []string{"FOO=bar"},
@@ -271,10 +292,17 @@ func TestGetBuildArgs(t *testing.T) {
 			description: "invalid build arg",
 			artifact: &latest.DockerArtifact{
 				BuildArgs: map[string]*string{
-					"key": util.StringPtr("{{INVALID"),
+					"key": util.Ptr("{{INVALID"),
 				},
 			},
 			shouldErr: true,
+		},
+		{
+			description: "add host",
+			artifact: &latest.DockerArtifact{
+				AddHost: []string{"1.gcr.io:127.0.0.1", "2.gcr.io:127.0.0.1"},
+			},
+			want: []string{"--add-host", "1.gcr.io:127.0.0.1", "--add-host", "2.gcr.io:127.0.0.1"},
 		},
 		{
 			description: "cache from",
@@ -282,6 +310,21 @@ func TestGetBuildArgs(t *testing.T) {
 				CacheFrom: []string{"gcr.io/foo/bar", "baz:latest"},
 			},
 			want: []string{"--cache-from", "gcr.io/foo/bar", "--cache-from", "baz:latest"},
+		},
+		{
+			description: "additional CLI flags",
+			artifact: &latest.DockerArtifact{
+				CliFlags: []string{"--foo", "--bar"},
+			},
+			want: []string{"--foo", "--bar"},
+		},
+		{
+			description: "expand env for CLI flags",
+			artifact: &latest.DockerArtifact{
+				CliFlags: []string{"--cache-to=type=registry,ref={{ .IMAGE_REPO }}/cache-image:cache"},
+			},
+			env:  []string{"IMAGE_REPO=docker.io/library"},
+			want: []string{"--cache-to=type=registry,ref=docker.io/library/cache-image:cache"},
 		},
 		{
 			description: "target",
@@ -305,23 +348,97 @@ func TestGetBuildArgs(t *testing.T) {
 			want: []string{"--no-cache"},
 		},
 		{
+			description: "pullParent",
+			artifact: &latest.DockerArtifact{
+				PullParent: true,
+			},
+			want: []string{"--pull"},
+		},
+		{
+			description: "squash",
+			artifact: &latest.DockerArtifact{
+				Squash: true,
+			},
+			want: []string{"--squash"},
+		},
+		{
+			description: "secret with no source",
+			artifact: &latest.DockerArtifact{
+				Secrets: []*latest.DockerSecret{
+					{ID: "mysecret"},
+				},
+			},
+			want: []string{"--secret", "id=mysecret"},
+		},
+		{
+			description: "secret with file source",
+			artifact: &latest.DockerArtifact{
+				Secrets: []*latest.DockerSecret{
+					{ID: "mysecret", Source: "foo.src"},
+				},
+			},
+			want: []string{"--secret", "id=mysecret,src=foo.src"},
+		},
+		{
+			description: "secret with file source in home directory",
+			artifact: &latest.DockerArtifact{
+				Secrets: []*latest.DockerSecret{
+					{ID: "mysecret", Source: "~/foo.src"},
+				},
+			},
+			want: []string{"--secret", fmt.Sprintf("id=mysecret,src=%s", util.ExpandHomePath("~/foo.src"))},
+		},
+		{
+			description: "secret with env source",
+			artifact: &latest.DockerArtifact{
+				Secrets: []*latest.DockerSecret{
+					{ID: "mysecret", Env: "FOO"},
+				},
+			},
+			want: []string{"--secret", "id=mysecret,env=FOO"},
+		},
+		{
+			description: "multiple secrets",
+			artifact: &latest.DockerArtifact{
+				Secrets: []*latest.DockerSecret{
+					{ID: "mysecret", Source: "foo.src"},
+					{ID: "anothersecret", Source: "bar.src"},
+				},
+			},
+			want: []string{"--secret", "id=mysecret,src=foo.src", "--secret", "id=anothersecret,src=bar.src"},
+		},
+		{
+			description: "ssh with no source",
+			artifact: &latest.DockerArtifact{
+				SSH: "default",
+			},
+			want: []string{"--ssh", "default"},
+		},
+		{
 			description: "all",
 			artifact: &latest.DockerArtifact{
 				BuildArgs: map[string]*string{
-					"key1": util.StringPtr("value1"),
+					"key1": util.Ptr("value1"),
 				},
 				CacheFrom:   []string{"foo"},
 				Target:      "stage1",
 				NetworkMode: "None",
+				CliFlags:    []string{"--foo", "--bar"},
+				PullParent:  true,
 			},
-			want: []string{"--build-arg", "key1=value1", "--cache-from", "foo", "--target", "stage1", "--network", "none"},
+			want: []string{"--build-arg", "key1=value1", "--cache-from", "foo", "--foo", "--bar", "--target", "stage1", "--network", "none", "--pull"},
 		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			t.Override(&util.OSEnviron, func() []string { return test.env })
+			args, err := util.EvaluateEnvTemplateMap(test.artifact.BuildArgs)
+			t.CheckError(test.shouldErr, err)
+			if test.shouldErr {
+				return
+			}
 
-			result, err := GetBuildArgs(test.artifact)
+			result, err := ToCLIBuildArgs(test.artifact, args, nil)
 
 			t.CheckError(test.shouldErr, err)
 			if !test.shouldErr {
@@ -365,63 +482,6 @@ func TestImageExists(t *testing.T) {
 			t.CheckDeepEqual(test.expected, actual)
 		})
 	}
-}
-
-func TestInsecureRegistry(t *testing.T) {
-	tests := []struct {
-		description        string
-		image              string
-		insecureRegistries map[string]bool
-		scheme             string
-		shouldErr          bool
-	}{
-		{
-			description:        "secure image",
-			image:              "gcr.io/secure/image",
-			insecureRegistries: map[string]bool{},
-			scheme:             "https",
-		},
-		{
-			description: "insecure image",
-			image:       "my.insecure.registry/image",
-			insecureRegistries: map[string]bool{
-				"my.insecure.registry": true,
-			},
-			scheme: "http",
-		},
-		{
-			description: "insecure image not provided by user",
-			image:       "my.insecure.registry/image",
-			shouldErr:   true,
-		},
-		{
-			description: "secure image provided in insecure registries list",
-			image:       "gcr.io/secure/image",
-			insecureRegistries: map[string]bool{
-				"gcr.io": true,
-			},
-			shouldErr: true,
-		},
-	}
-	for _, test := range tests {
-		testutil.Run(t, test.description, func(t *testutil.T) {
-			t.Override(&getRemoteImageImpl, func(ref name.Reference) (v1.Image, error) {
-				return &fakeImage{Reference: ref}, nil
-			})
-
-			img, err := remoteImage(test.image, test.insecureRegistries)
-
-			t.CheckNoError(err)
-			if !test.shouldErr {
-				t.CheckDeepEqual(test.scheme, img.(*fakeImage).Reference.Context().Registry.Scheme())
-			}
-		})
-	}
-}
-
-type fakeImage struct {
-	v1.Image
-	Reference name.Reference
 }
 
 func TestConfigFile(t *testing.T) {
@@ -494,6 +554,10 @@ func TestTagWithImageID(t *testing.T) {
 			description: "invalid",
 			imageName:   "!!invalid!!",
 			shouldErr:   true,
+		},
+		{
+			description: "empty image id",
+			imageName:   "ref",
 		},
 	}
 	for _, test := range tests {

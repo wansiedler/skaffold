@@ -17,19 +17,22 @@ limitations under the License.
 package analyze
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/buildpacks"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/jib"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/initializer/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/buildpacks"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/jib"
+	koinit "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/ko/init"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/initializer/build"
 )
 
 type builderAnalyzer struct {
 	directoryAnalyzer
 	enableJibInit        bool
 	enableJibGradleInit  bool
+	enableKoInit         bool
 	enableBuildpacksInit bool
 	findBuilders         bool
 	buildpacksBuilder    string
@@ -38,10 +41,10 @@ type builderAnalyzer struct {
 	parentDirToStopFindJibSettings string
 }
 
-func (a *builderAnalyzer) analyzeFile(filePath string) error {
+func (a *builderAnalyzer) analyzeFile(ctx context.Context, filePath string) error {
 	if a.findBuilders {
 		lookForJib := a.parentDirToStopFindJibSettings == "" || a.parentDirToStopFindJibSettings == a.currentDir
-		builderConfigs, lookForJib := a.detectBuilders(filePath, lookForJib)
+		builderConfigs, lookForJib := a.detectBuilders(ctx, filePath, lookForJib)
 		a.foundBuilders = append(a.foundBuilders, builderConfigs...)
 		if !lookForJib {
 			a.parentDirToStopFindJibSettings = a.currentDir
@@ -59,14 +62,14 @@ func (a *builderAnalyzer) exitDir(dir string) {
 // detectBuilders checks if a path is a builder config, and if it is, returns the InitBuilders representing the
 // configs. Also returns a boolean marking search completion for subdirectories (true = subdirectories should
 // continue to be searched, false = subdirectories should not be searched for more builders)
-func (a *builderAnalyzer) detectBuilders(path string, detectJib bool) ([]build.InitBuilder, bool) {
+func (a *builderAnalyzer) detectBuilders(ctx context.Context, path string, detectJib bool) ([]build.InitBuilder, bool) {
 	var results []build.InitBuilder
 	searchSubDirectories := true
 
 	// TODO: Remove backwards compatibility if statement (not entire block)
 	if a.enableJibInit && detectJib {
 		// Check for jib
-		if builders := jib.Validate(path, a.enableJibGradleInit); builders != nil {
+		if builders := jib.Validate(ctx, path, a.enableJibGradleInit); builders != nil {
 			for i := range builders {
 				results = append(results, builders[i])
 			}
@@ -79,6 +82,15 @@ func (a *builderAnalyzer) detectBuilders(path string, detectJib bool) ([]build.I
 	if strings.Contains(strings.ToLower(base), "dockerfile") {
 		if docker.Validate(path) {
 			results = append(results, docker.ArtifactConfig{
+				// Docker expects forward slashes (for Linux containers at least)
+				File: filepath.ToSlash(path),
+			})
+		}
+	}
+
+	if a.enableKoInit {
+		if koinit.Validate(path) {
+			results = append(results, koinit.ArtifactConfig{
 				File: path,
 			})
 		}

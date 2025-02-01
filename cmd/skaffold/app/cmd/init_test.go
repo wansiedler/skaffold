@@ -24,9 +24,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	cfg "github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/initializer/config"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	cfg "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/initializer/config"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestFlagsToConfigVersion(t *testing.T) {
@@ -46,16 +46,17 @@ func TestFlagsToConfigVersion(t *testing.T) {
 			shouldErr:  true,
 			expectedConfig: config.Config{
 				ComposeFile:            "",
-				CliArtifacts:           nil,
-				CliKubernetesManifests: nil,
+				CliArtifacts:           []string{},
+				CliKubernetesManifests: []string{},
 				SkipBuild:              false,
 				SkipDeploy:             false,
 				Force:                  false,
 				Analyze:                false,
-				EnableJibInit:          false,
+				EnableJibInit:          true,
 				EnableJibGradleInit:    false,
-				EnableBuildpacksInit:   false,
-				EnableNewInitFormat:    false,
+				EnableKoInit:           false,
+				EnableBuildpacksInit:   true,
+				EnableNewInitFormat:    true,
 				BuildpacksBuilder:      "gcr.io/buildpacks/builder:v1",
 				Opts:                   opts,
 				MaxFileSize:            maxFileSize,
@@ -77,6 +78,7 @@ func TestFlagsToConfigVersion(t *testing.T) {
 				"--analyze",
 				"--XXenableJibInit",
 				"--XXenableJibGradleInit",
+				"--XXenableKoInit=true",
 				"--XXenableBuildpacksInit",
 				"--XXenableNewInitFormat",
 				"--XXdefaultBuildpacksBuilder", "buildpacks/builder",
@@ -91,6 +93,7 @@ func TestFlagsToConfigVersion(t *testing.T) {
 				Analyze:                true,
 				EnableJibInit:          true,
 				EnableJibGradleInit:    true,
+				EnableKoInit:           true,
 				EnableBuildpacksInit:   true,
 				EnableNewInitFormat:    true,
 				BuildpacksBuilder:      "buildpacks/builder",
@@ -104,16 +107,44 @@ func TestFlagsToConfigVersion(t *testing.T) {
 			args: []string{
 				"init",
 				"--XXenableJibInit",
+				"--XXenableKoInit=false",
+				"--XXenableBuildpacksInit=false",
 			},
 			expectedConfig: config.Config{
 				ComposeFile:            "",
-				CliArtifacts:           nil,
-				CliKubernetesManifests: nil,
+				CliArtifacts:           []string{},
+				CliKubernetesManifests: []string{},
 				SkipBuild:              false,
 				SkipDeploy:             false,
 				Force:                  false,
 				Analyze:                false,
 				EnableJibInit:          true,
+				EnableKoInit:           false,
+				EnableBuildpacksInit:   false,
+				EnableNewInitFormat:    true,
+				BuildpacksBuilder:      "gcr.io/buildpacks/builder:v1",
+				Opts:                   opts,
+				MaxFileSize:            maxFileSize,
+			},
+		},
+		{
+			name: "enableKoInit implies enableNewInitFormat",
+			args: []string{
+				"init",
+				"--XXenableJibInit=false",
+				"--XXenableKoInit",
+				"--XXenableBuildpacksInit=false",
+			},
+			expectedConfig: config.Config{
+				ComposeFile:            "",
+				CliArtifacts:           []string{},
+				CliKubernetesManifests: []string{},
+				SkipBuild:              false,
+				SkipDeploy:             false,
+				Force:                  false,
+				Analyze:                false,
+				EnableJibInit:          false,
+				EnableKoInit:           true,
 				EnableBuildpacksInit:   false,
 				EnableNewInitFormat:    true,
 				BuildpacksBuilder:      "gcr.io/buildpacks/builder:v1",
@@ -125,17 +156,20 @@ func TestFlagsToConfigVersion(t *testing.T) {
 			name: "enableBuildpackInit implies enableNewInitFormat",
 			args: []string{
 				"init",
+				"--XXenableJibInit=false",
+				"--XXenableKoInit=false",
 				"--XXenableBuildpacksInit",
 			},
 			expectedConfig: config.Config{
 				ComposeFile:            "",
-				CliArtifacts:           nil,
-				CliKubernetesManifests: nil,
+				CliArtifacts:           []string{},
+				CliKubernetesManifests: []string{},
 				SkipBuild:              false,
 				SkipDeploy:             false,
 				Force:                  false,
 				Analyze:                false,
 				EnableJibInit:          false,
+				EnableKoInit:           false,
 				EnableBuildpacksInit:   true,
 				EnableNewInitFormat:    true,
 				BuildpacksBuilder:      "gcr.io/buildpacks/builder:v1",
@@ -157,7 +191,7 @@ func TestFlagsToConfigVersion(t *testing.T) {
 
 			// we ignore Skaffold options
 			test.expectedConfig.Opts = capturedConfig.Opts
-			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expectedConfig, capturedConfig, cmp.AllowUnexported(cfg.StringOrUndefined{}))
+			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expectedConfig, capturedConfig, cmp.AllowUnexported(cfg.StringOrUndefined{}, cfg.BoolOrUndefined{}, cfg.IntOrUndefined{}, cfg.SyncRemoteCacheOption{}))
 		})
 	}
 }

@@ -18,12 +18,12 @@ package diagnose
 
 import (
 	"context"
-	"io/ioutil"
+	"io"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner/runcontext"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestSizeOfDockerContext(t *testing.T) {
@@ -80,23 +80,57 @@ func TestSizeOfDockerContext(t *testing.T) {
 func TestCheckArtifacts(t *testing.T) {
 	testutil.Run(t, "", func(t *testutil.T) {
 		tmpDir := t.NewTempDir().Write("Dockerfile", "FROM busybox")
-
-		runCtx := &runcontext.RunContext{
-			Cfg: latest.Pipeline{
-				Build: latest.BuildConfig{
-					Artifacts: []*latest.Artifact{{
-						Workspace: tmpDir.Root(),
-						ArtifactType: latest.ArtifactType{
-							DockerArtifact: &latest.DockerArtifact{
-								DockerfilePath: "Dockerfile",
-							},
-						},
-					}},
+		tags := map[string]string{"base": "gcr.io/library/busybox:latest"}
+		err := CheckArtifacts(context.Background(), &mockConfig{
+			artifacts: []*latest.Artifact{{
+				ImageName: "base",
+				Workspace: tmpDir.Root(),
+				ArtifactType: latest.ArtifactType{
+					DockerArtifact: &latest.DockerArtifact{
+						DockerfilePath: "Dockerfile",
+					},
 				},
-			},
-		}
-		err := CheckArtifacts(context.Background(), runCtx, ioutil.Discard)
-
+			}},
+		}, tags, io.Discard)
 		t.CheckNoError(err)
 	})
+}
+
+func TestCheckArtifactsFailure(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		tmpDir := t.NewTempDir().Write("Dockerfile", "FROM busybox")
+		err := CheckArtifacts(context.Background(), &mockConfig{
+			artifacts: []*latest.Artifact{{
+				ImageName: "base",
+				Workspace: tmpDir.Root(),
+				ArtifactType: latest.ArtifactType{
+					DockerArtifact: &latest.DockerArtifact{
+						DockerfilePath: "Dockerfile",
+					},
+				},
+			}},
+		}, nil, io.Discard)
+		t.CheckError(true, err)
+	})
+}
+
+type mockConfig struct {
+	runcontext.RunContext // Embedded to provide the default values.
+	artifacts             []*latest.Artifact
+}
+
+func (c *mockConfig) PipelineForImage() latest.Pipeline {
+	var pipeline latest.Pipeline
+	pipeline.Build.Artifacts = c.artifacts
+	return pipeline
+}
+
+func (c *mockConfig) GetPipelines() []latest.Pipeline {
+	var pipelines []latest.Pipeline
+	pipelines = append(pipelines, c.PipelineForImage())
+	return pipelines
+}
+
+func (c *mockConfig) Artifacts() []*latest.Artifact {
+	return c.artifacts
 }

@@ -17,20 +17,22 @@ limitations under the License.
 package gcb
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 
-	cloudbuild "google.golang.org/api/cloudbuild/v1"
+	"google.golang.org/api/cloudbuild/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/jib"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/jib"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
-func (b *Builder) jibBuildSpec(artifact *latest.Artifact, tag string) (cloudbuild.Build, error) {
-	t, err := jib.DeterminePluginType(artifact.Workspace, artifact.JibArtifact)
+func (b *Builder) jibBuildSpec(ctx context.Context, artifact *latest.Artifact, tag string, platforms platform.Matcher) (cloudbuild.Build, error) {
+	t, err := jib.DeterminePluginType(ctx, artifact.Workspace, artifact.JibArtifact)
 	if err != nil {
 		return cloudbuild.Build{}, err
 	}
@@ -41,7 +43,7 @@ func (b *Builder) jibBuildSpec(artifact *latest.Artifact, tag string) (cloudbuil
 			Steps: []*cloudbuild.BuildStep{{
 				Name:       b.MavenImage,
 				Entrypoint: "sh",
-				Args:       fixHome("mvn", jib.GenerateMavenBuildArgs("build", tag, artifact.JibArtifact, b.skipTests, b.insecureRegistries)),
+				Args:       fixHome("mvn", jib.GenerateMavenBuildArgs("build", tag, artifact.JibArtifact, platforms, b.skipTests, true, artifact.Dependencies, b.artifactStore, b.cfg.GetInsecureRegistries(), false)),
 			}},
 		}, nil
 	case jib.JibGradle:
@@ -49,7 +51,7 @@ func (b *Builder) jibBuildSpec(artifact *latest.Artifact, tag string) (cloudbuil
 			Steps: []*cloudbuild.BuildStep{{
 				Name:       b.GradleImage,
 				Entrypoint: "sh",
-				Args:       fixHome("gradle", jib.GenerateGradleBuildArgs("jib", tag, artifact.JibArtifact, b.skipTests, b.insecureRegistries)),
+				Args:       fixHome("gradle", jib.GenerateGradleBuildArgs("jib", tag, artifact.JibArtifact, platforms, b.skipTests, true, artifact.Dependencies, b.artifactStore, b.cfg.GetInsecureRegistries(), false)),
 			}},
 		}, nil
 	default:

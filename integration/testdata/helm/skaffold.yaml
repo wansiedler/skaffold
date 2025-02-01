@@ -1,10 +1,10 @@
-apiVersion: skaffold/v1beta10
+apiVersion: skaffold/v4beta12
 kind: Config
 build:
   tagPolicy:
     sha256: {}
   artifacts:
-  - image: gcr.io/k8s-skaffold/skaffold-helm
+  - image: us-central1-docker.pkg.dev/k8s-skaffold/testing/skaffold-helm
 deploy:
   helm:
     releases:
@@ -14,14 +14,39 @@ deploy:
       #wait: true
       #valuesFiles:
       #- helm-skaffold-values.yaml
-      values:
-        image: gcr.io/k8s-skaffold/skaffold-helm
-      #recreatePods will pass --recreate-pods to helm upgrade
-      #recreatePods: true
-      #overrides builds an override values.yaml file to run with the helm deploy
-      #overrides:
-      # some:
-      #   key: someValue
-      #setValues get appended to the helm deploy with --set.
-      #setValues:
-        #some.key: someValue
+profiles:
+- name: helm-render
+  deploy:
+    helm:
+      releases:
+      # seed test namespace in the release name.
+      - name: skaffold-helm-{{.TEST_NS}}
+        chartPath: skaffold-helm
+        setValues:
+          pullPolicy: always
+- name: helm-hook
+  deploy:
+    helm:
+      releases:
+        # seed test namespace in the release name.
+        - name: skaffold-helm-{{.TEST_NS}}
+          chartPath: skaffold-helm
+      flags:
+        install:
+          - "--post-renderer=./change_replicas.py"
+- name: helm-with-global-flags
+  deploy:
+    helm:
+      flags:
+        global:
+          - "--debug"
+      releases:
+        # seed test namespace in the release name.
+        - name: skaffold-helm-{{.TEST_NS}}
+          chartPath: skaffold-helm
+- name: helm-templating-charPath
+  deploy:
+    helm:
+      releases:
+        - name: skaffold-helm
+          chartPath: '{{.FOO}}'

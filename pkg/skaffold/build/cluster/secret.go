@@ -17,54 +17,55 @@ limitations under the License.
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"os"
 
-	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	typedV1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/kaniko"
+	kubernetesclient "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/client"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
 )
 
 const (
 	defaultKanikoSecretPath = "kaniko-secret"
 )
 
-func (b *Builder) setupPullSecret(out io.Writer) (func(), error) {
+func (b *Builder) setupPullSecret(ctx context.Context, out io.Writer) (func(), error) {
 	if b.PullSecretPath == "" && b.PullSecretName == "" {
 		return func() {}, nil
 	}
 
-	color.Default.Fprintf(out, "Checking for kaniko secret [%s/%s]...\n", b.Namespace, b.PullSecretName)
-	client, err := kubernetes.Client()
+	output.Default.Fprintf(out, "Checking for kaniko secret [%s/%s]...\n", b.Namespace, b.PullSecretName)
+	client, err := kubernetesclient.DefaultClient()
 	if err != nil {
 		return nil, fmt.Errorf("getting Kubernetes client: %w", err)
 	}
 
 	secrets := client.CoreV1().Secrets(b.Namespace)
-	if _, err := secrets.Get(b.PullSecretName, metav1.GetOptions{}); err != nil {
-		color.Default.Fprintf(out, "Creating kaniko secret [%s/%s]...\n", b.Namespace, b.PullSecretName)
+	if _, err := secrets.Get(ctx, b.PullSecretName, metav1.GetOptions{}); err != nil {
+		output.Default.Fprintf(out, "Creating kaniko secret [%s/%s]...\n", b.Namespace, b.PullSecretName)
 		if b.PullSecretPath == "" {
 			return nil, fmt.Errorf("secret %s does not exist. No path specified to create it", b.PullSecretName)
 		}
-		return b.createSecretFromFile(secrets)
+		return b.createSecretFromFile(ctx, secrets)
 	}
 	if b.PullSecretPath == "" {
 		// TODO: Remove the warning when pod health check can display pod failure errors.
-		logrus.Warnf("Assuming the secret %s is mounted inside Kaniko pod with the filename %s. If your secret is mounted at different path, please specify using config key `pullSecretPath`.\nSee https://skaffold.dev/docs/references/yaml/#build-cluster-pullSecretPath", b.PullSecretName, defaultKanikoSecretPath)
+		log.Entry(ctx).Warnf("Assuming the secret %s is mounted inside Kaniko pod with the filename %s. If your secret is mounted at different path, please specify using config key `pullSecretPath`.\nSee https://skaffold.dev/docs/references/yaml/#build-cluster-pullSecretPath", b.PullSecretName, defaultKanikoSecretPath)
 		b.PullSecretPath = defaultKanikoSecretPath
 		return func() {}, nil
 	}
 	return func() {}, nil
 }
 
-func (b *Builder) createSecretFromFile(secrets typedV1.SecretInterface) (func(), error) {
-	secretData, err := ioutil.ReadFile(b.PullSecretPath)
+func (b *Builder) createSecretFromFile(ctx context.Context, secrets typedV1.SecretInterface) (func(), error) {
+	secretData, err := os.ReadFile(b.PullSecretPath)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create secret %s from path %s. reading pull secret: %w", b.PullSecretName, b.PullSecretPath, err)
 	}
@@ -74,29 +75,29 @@ func (b *Builder) createSecretFromFile(secrets typedV1.SecretInterface) (func(),
 			Labels: map[string]string{"skaffold-kaniko": "skaffold-kaniko"},
 		},
 		Data: map[string][]byte{
-			constants.DefaultKanikoSecretName: secretData,
+			kaniko.DefaultSecretName: secretData,
 		},
 	}
-	b.PullSecretPath = constants.DefaultKanikoSecretName
-	if _, err := secrets.Create(secret); err != nil {
+	b.PullSecretPath = kaniko.DefaultSecretName
+	if _, err := secrets.Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 		return nil, fmt.Errorf("creating pull secret %q: %w", b.PullSecretName, err)
 	}
 
 	return func() {
-		if err := secrets.Delete(b.PullSecretName, &metav1.DeleteOptions{}); err != nil {
-			logrus.Warnf("deleting pull secret")
+		if err := secrets.Delete(ctx, b.PullSecretName, metav1.DeleteOptions{}); err != nil {
+			log.Entry(ctx).Warn("deleting pull secret")
 		}
 	}, nil
 }
 
-func (b *Builder) setupDockerConfigSecret(out io.Writer) (func(), error) {
+func (b *Builder) setupDockerConfigSecret(ctx context.Context, out io.Writer) (func(), error) {
 	if b.DockerConfig == nil {
 		return func() {}, nil
 	}
 
-	color.Default.Fprintf(out, "Creating docker config secret [%s]...\n", b.DockerConfig.SecretName)
+	output.Default.Fprintf(out, "Creating docker config secret [%s]...\n", b.DockerConfig.SecretName)
 
-	client, err := kubernetes.Client()
+	client, err := kubernetesclient.DefaultClient()
 	if err != nil {
 		return nil, fmt.Errorf("getting Kubernetes client: %w", err)
 	}
@@ -104,16 +105,16 @@ func (b *Builder) setupDockerConfigSecret(out io.Writer) (func(), error) {
 	secrets := client.CoreV1().Secrets(b.Namespace)
 
 	if b.DockerConfig.Path == "" {
-		logrus.Debug("No docker config specified. Checking for one in the cluster.")
+		log.Entry(ctx).Debug("No docker config specified. Checking for one in the cluster.")
 
-		if _, err := secrets.Get(b.DockerConfig.SecretName, metav1.GetOptions{}); err != nil {
+		if _, err := secrets.Get(ctx, b.DockerConfig.SecretName, metav1.GetOptions{}); err != nil {
 			return nil, fmt.Errorf("checking for existing kaniko secret: %w", err)
 		}
 
 		return func() {}, nil
 	}
 
-	secretData, err := ioutil.ReadFile(b.DockerConfig.Path)
+	secretData, err := os.ReadFile(b.DockerConfig.Path)
 	if err != nil {
 		return nil, fmt.Errorf("reading docker config: %w", err)
 	}
@@ -128,13 +129,13 @@ func (b *Builder) setupDockerConfigSecret(out io.Writer) (func(), error) {
 		},
 	}
 
-	if _, err := secrets.Create(secret); err != nil {
+	if _, err := secrets.Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 		return nil, fmt.Errorf("creating docker config secret %q: %w", b.DockerConfig.SecretName, err)
 	}
 
 	return func() {
-		if err := secrets.Delete(b.DockerConfig.SecretName, &metav1.DeleteOptions{}); err != nil {
-			logrus.Warnf("deleting docker config secret")
+		if err := secrets.Delete(ctx, b.DockerConfig.SecretName, metav1.DeleteOptions{}); err != nil {
+			log.Entry(ctx).Warn("deleting docker config secret")
 		}
 	}, nil
 }

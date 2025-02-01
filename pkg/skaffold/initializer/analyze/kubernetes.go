@@ -17,8 +17,10 @@ limitations under the License.
 package analyze
 
 import (
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema"
+	"context"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema"
 )
 
 // kubeAnalyzer is a Visitor during the directory analysis that collects kubernetes manifests
@@ -27,7 +29,7 @@ type kubeAnalyzer struct {
 	kubernetesManifests []string
 }
 
-func (k *kubeAnalyzer) analyzeFile(filePath string) error {
+func (k *kubeAnalyzer) analyzeFile(ctx context.Context, filePath string) error {
 	if kubernetes.IsKubernetesManifest(filePath) && !schema.IsSkaffoldConfig(filePath) {
 		k.kubernetesManifests = append(k.kubernetesManifests, filePath)
 	}

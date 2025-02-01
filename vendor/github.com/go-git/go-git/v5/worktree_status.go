@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/go-git/go-billy/v5/util"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -28,10 +29,23 @@ var (
 	// ErrGlobNoMatches in an AddGlob if the glob pattern does not match any
 	// files in the worktree.
 	ErrGlobNoMatches = errors.New("glob pattern did not match any files")
+	// ErrUnsupportedStatusStrategy occurs when an invalid StatusStrategy is used
+	// when processing the Worktree status.
+	ErrUnsupportedStatusStrategy = errors.New("unsupported status strategy")
 )
 
 // Status returns the working tree status.
 func (w *Worktree) Status() (Status, error) {
+	return w.StatusWithOptions(StatusOptions{Strategy: defaultStatusStrategy})
+}
+
+// StatusOptions defines the options for Worktree.StatusWithOptions().
+type StatusOptions struct {
+	Strategy StatusStrategy
+}
+
+// StatusWithOptions returns the working tree status.
+func (w *Worktree) StatusWithOptions(o StatusOptions) (Status, error) {
 	var hash plumbing.Hash
 
 	ref, err := w.r.Head()
@@ -43,11 +57,14 @@ func (w *Worktree) Status() (Status, error) {
 		hash = ref.Hash()
 	}
 
-	return w.status(hash)
+	return w.status(o.Strategy, hash)
 }
 
-func (w *Worktree) status(commit plumbing.Hash) (Status, error) {
-	s := make(Status)
+func (w *Worktree) status(ss StatusStrategy, commit plumbing.Hash) (Status, error) {
+	s, err := ss.new(w)
+	if err != nil {
+		return nil, err
+	}
 
 	left, err := w.diffCommitWithStaging(commit, false)
 	if err != nil {
@@ -73,7 +90,7 @@ func (w *Worktree) status(commit plumbing.Hash) (Status, error) {
 		}
 	}
 
-	right, err := w.diffStagingWithWorktree(false)
+	right, err := w.diffStagingWithWorktree(false, true)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +129,7 @@ func nameFromAction(ch *merkletrie.Change) string {
 	return name
 }
 
-func (w *Worktree) diffStagingWithWorktree(reverse bool) (merkletrie.Changes, error) {
+func (w *Worktree) diffStagingWithWorktree(reverse, excludeIgnoredChanges bool) (merkletrie.Changes, error) {
 	idx, err := w.r.Storer.Index()
 	if err != nil {
 		return nil, err
@@ -137,7 +154,10 @@ func (w *Worktree) diffStagingWithWorktree(reverse bool) (merkletrie.Changes, er
 		return nil, err
 	}
 
-	return w.excludeIgnoredChanges(c), nil
+	if excludeIgnoredChanges {
+		return w.excludeIgnoredChanges(c), nil
+	}
+	return c, nil
 }
 
 func (w *Worktree) excludeIgnoredChanges(changes merkletrie.Changes) merkletrie.Changes {
@@ -168,7 +188,9 @@ func (w *Worktree) excludeIgnoredChanges(changes merkletrie.Changes) merkletrie.
 		if len(path) != 0 {
 			isDir := (len(ch.To) > 0 && ch.To.IsDir()) || (len(ch.From) > 0 && ch.From.IsDir())
 			if m.Match(path, isDir) {
-				continue
+				if len(ch.From) == 0 {
+					continue
+				}
 			}
 		}
 		res = append(res, ch)
@@ -264,12 +286,70 @@ func diffTreeIsEquals(a, b noder.Hasher) bool {
 // the worktree to the index. If any of the files is already staged in the index
 // no error is returned. When path is a file, the blob.Hash is returned.
 func (w *Worktree) Add(path string) (plumbing.Hash, error) {
-	// TODO(mcuadros): remove plumbing.Hash from signature at v5.
-	s, err := w.Status()
-	if err != nil {
-		return plumbing.ZeroHash, err
+	// TODO(mcuadros): deprecate in favor of AddWithOption in v6.
+	return w.doAdd(path, make([]gitignore.Pattern, 0), false)
+}
+
+func (w *Worktree) doAddDirectory(idx *index.Index, s Status, directory string, ignorePattern []gitignore.Pattern) (added bool, err error) {
+	if len(ignorePattern) > 0 {
+		m := gitignore.NewMatcher(ignorePattern)
+		matchPath := strings.Split(directory, string(os.PathSeparator))
+		if m.Match(matchPath, true) {
+			// ignore
+			return false, nil
+		}
 	}
 
+	directory = filepath.ToSlash(filepath.Clean(directory))
+
+	for name := range s {
+		if !isPathInDirectory(name, directory) {
+			continue
+		}
+
+		var a bool
+		a, _, err = w.doAddFile(idx, s, name, ignorePattern)
+		if err != nil {
+			return
+		}
+
+		added = added || a
+	}
+
+	return
+}
+
+func isPathInDirectory(path, directory string) bool {
+	return directory == "." || strings.HasPrefix(path, directory+"/")
+}
+
+// AddWithOptions file contents to the index,  updates the index using the
+// current content found in the working tree, to prepare the content staged for
+// the next commit.
+//
+// It typically adds the current content of existing paths as a whole, but with
+// some options it can also be used to add content with only part of the changes
+// made to the working tree files applied, or remove paths that do not exist in
+// the working tree anymore.
+func (w *Worktree) AddWithOptions(opts *AddOptions) error {
+	if err := opts.Validate(w.r); err != nil {
+		return err
+	}
+
+	if opts.All {
+		_, err := w.doAdd(".", w.Excludes, false)
+		return err
+	}
+
+	if opts.Glob != "" {
+		return w.AddGlob(opts.Glob)
+	}
+
+	_, err := w.doAdd(opts.Path, make([]gitignore.Pattern, 0), opts.SkipStatus)
+	return err
+}
+
+func (w *Worktree) doAdd(path string, ignorePattern []gitignore.Pattern, skipStatus bool) (plumbing.Hash, error) {
 	idx, err := w.r.Storer.Index()
 	if err != nil {
 		return plumbing.ZeroHash, err
@@ -279,10 +359,23 @@ func (w *Worktree) Add(path string) (plumbing.Hash, error) {
 	var added bool
 
 	fi, err := w.Filesystem.Lstat(path)
+
+	// status is required for doAddDirectory
+	var s Status
+	var err2 error
+	if !skipStatus || fi == nil || fi.IsDir() {
+		s, err2 = w.Status()
+		if err2 != nil {
+			return plumbing.ZeroHash, err2
+		}
+	}
+
+	path = filepath.Clean(path)
+
 	if err != nil || !fi.IsDir() {
-		added, h, err = w.doAddFile(idx, s, path)
+		added, h, err = w.doAddFile(idx, s, path, ignorePattern)
 	} else {
-		added, err = w.doAddDirectory(idx, s, path)
+		added, err = w.doAddDirectory(idx, s, path, ignorePattern)
 	}
 
 	if err != nil {
@@ -296,42 +389,11 @@ func (w *Worktree) Add(path string) (plumbing.Hash, error) {
 	return h, w.r.Storer.SetIndex(idx)
 }
 
-func (w *Worktree) doAddDirectory(idx *index.Index, s Status, directory string) (added bool, err error) {
-	files, err := w.Filesystem.ReadDir(directory)
-	if err != nil {
-		return false, err
-	}
-
-	for _, file := range files {
-		name := path.Join(directory, file.Name())
-
-		var a bool
-		if file.IsDir() {
-			if file.Name() == GitDirName {
-				// ignore special git directory
-				continue
-			}
-			a, err = w.doAddDirectory(idx, s, name)
-		} else {
-			a, _, err = w.doAddFile(idx, s, name)
-		}
-
-		if err != nil {
-			return
-		}
-
-		if !added && a {
-			added = true
-		}
-	}
-
-	return
-}
-
 // AddGlob adds all paths, matching pattern, to the index. If pattern matches a
 // directory path, all directory contents are added to the index recursively. No
 // error is returned if all matching paths are already staged in index.
 func (w *Worktree) AddGlob(pattern string) error {
+	// TODO(mcuadros): deprecate in favor of AddWithOption in v6.
 	files, err := util.Glob(w.Filesystem, pattern)
 	if err != nil {
 		return err
@@ -360,9 +422,9 @@ func (w *Worktree) AddGlob(pattern string) error {
 
 		var added bool
 		if fi.IsDir() {
-			added, err = w.doAddDirectory(idx, s, file)
+			added, err = w.doAddDirectory(idx, s, file, make([]gitignore.Pattern, 0))
 		} else {
-			added, _, err = w.doAddFile(idx, s, file)
+			added, _, err = w.doAddFile(idx, s, file, make([]gitignore.Pattern, 0))
 		}
 
 		if err != nil {
@@ -383,9 +445,18 @@ func (w *Worktree) AddGlob(pattern string) error {
 
 // doAddFile create a new blob from path and update the index, added is true if
 // the file added is different from the index.
-func (w *Worktree) doAddFile(idx *index.Index, s Status, path string) (added bool, h plumbing.Hash, err error) {
-	if s.File(path).Worktree == Unmodified {
+// if s status is nil will skip the status check and update the index anyway
+func (w *Worktree) doAddFile(idx *index.Index, s Status, path string, ignorePattern []gitignore.Pattern) (added bool, h plumbing.Hash, err error) {
+	if s != nil && s.File(path).Worktree == Unmodified {
 		return false, h, nil
+	}
+	if len(ignorePattern) > 0 {
+		m := gitignore.NewMatcher(ignorePattern)
+		matchPath := strings.Split(path, string(os.PathSeparator))
+		if m.Match(matchPath, true) {
+			// ignore
+			return false, h, nil
+		}
 	}
 
 	h, err = w.copyFileToStorage(path)
@@ -435,7 +506,7 @@ func (w *Worktree) copyFileToStorage(path string) (hash plumbing.Hash, err error
 	return w.r.Storer.SetEncodedObject(obj)
 }
 
-func (w *Worktree) fillEncodedObjectFromFile(dst io.Writer, path string, fi os.FileInfo) (err error) {
+func (w *Worktree) fillEncodedObjectFromFile(dst io.Writer, path string, _ os.FileInfo) (err error) {
 	src, err := w.Filesystem.Open(path)
 	if err != nil {
 		return err
@@ -450,7 +521,7 @@ func (w *Worktree) fillEncodedObjectFromFile(dst io.Writer, path string, fi os.F
 	return err
 }
 
-func (w *Worktree) fillEncodedObjectFromSymlink(dst io.Writer, path string, fi os.FileInfo) error {
+func (w *Worktree) fillEncodedObjectFromSymlink(dst io.Writer, path string, _ os.FileInfo) error {
 	target, err := w.Filesystem.Readlink(path)
 	if err != nil {
 		return err
@@ -490,9 +561,11 @@ func (w *Worktree) doUpdateFileToIndex(e *index.Entry, filename string, h plumbi
 		return err
 	}
 
-	if e.Mode.IsRegular() {
-		e.Size = uint32(info.Size())
-	}
+	// The entry size must always reflect the current state, otherwise
+	// it will cause go-git's Worktree.Status() to divert from "git status".
+	// The size of a symlink is the length of the path to the target.
+	// The size of Regular and Executable files is the size of the files.
+	e.Size = uint32(info.Size())
 
 	fillSystemInfo(e, info.Sys())
 	return nil

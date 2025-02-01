@@ -17,97 +17,172 @@ limitations under the License.
 package deploy
 
 import (
-	"bytes"
 	"context"
 	"io"
-	"sort"
-	"strings"
+	"strconv"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/access"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/constants"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/debug"
+	eventV2 "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/event/v2"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/instrumentation"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/manifest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/status"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/sync"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util/stringset"
 )
 
 // DeployerMux forwards all method calls to the deployers it contains.
 // When encountering an error, it aborts and returns the error. Otherwise,
 // it collects the results and returns it in bulk.
-type DeployerMux []Deployer
-
-type unit struct{}
-
-// stringSet helps to de-duplicate a set of strings.
-type stringSet map[string]unit
-
-func newStringSet() stringSet {
-	return make(map[string]unit)
+type DeployerMux struct {
+	iterativeStatusCheck bool
+	deployers            []Deployer
 }
 
-// insert adds strings to the set.
-func (s stringSet) insert(strings ...string) {
-	for _, item := range strings {
-		s[item] = unit{}
+type deployerWithHooks interface {
+	HasRunnableHooks() bool
+	PreDeployHooks(context.Context, io.Writer) error
+	PostDeployHooks(context.Context, io.Writer) error
+}
+
+func NewDeployerMux(deployers []Deployer, iterativeStatusCheck bool) Deployer {
+	return DeployerMux{deployers: deployers, iterativeStatusCheck: iterativeStatusCheck}
+}
+
+func (m DeployerMux) GetDeployers() []Deployer {
+	return m.deployers
+}
+
+func (m DeployerMux) GetDeployersInverse() []Deployer {
+	inverse := m.deployers
+	for i, j := 0, len(inverse)-1; i < j; i, j = i+1, j-1 {
+		inverse[i], inverse[j] = inverse[j], inverse[i]
+	}
+	return inverse
+}
+
+func (m DeployerMux) GetAccessor() access.Accessor {
+	var accessors access.AccessorMux
+	for _, deployer := range m.deployers {
+		accessors = append(accessors, deployer.GetAccessor())
+	}
+	return accessors
+}
+
+func (m DeployerMux) GetDebugger() debug.Debugger {
+	var debuggers debug.DebuggerMux
+	for _, deployer := range m.deployers {
+		debuggers = append(debuggers, deployer.GetDebugger())
+	}
+	return debuggers
+}
+
+func (m DeployerMux) GetLogger() log.Logger {
+	var loggers log.LoggerMux
+	for _, deployer := range m.deployers {
+		loggers = append(loggers, deployer.GetLogger())
+	}
+	return loggers
+}
+
+func (m DeployerMux) GetStatusMonitor() status.Monitor {
+	var monitors status.MonitorMux
+	for _, deployer := range m.deployers {
+		monitors = append(monitors, deployer.GetStatusMonitor())
+	}
+	return monitors
+}
+
+func (m DeployerMux) GetSyncer() sync.Syncer {
+	var syncers sync.SyncerMux
+	for _, deployer := range m.deployers {
+		syncers = append(syncers, deployer.GetSyncer())
+	}
+	return syncers
+}
+
+func (m DeployerMux) RegisterLocalImages(images []graph.Artifact) {
+	for _, deployer := range m.deployers {
+		deployer.RegisterLocalImages(images)
 	}
 }
 
-// toList returns the sorted list of inserted strings.
-func (s stringSet) toList() []string {
-	var res []string
-	for item := range s {
-		res = append(res, item)
-	}
-	sort.Strings(res)
-	return res
+func (m DeployerMux) ConfigName() string {
+	return ""
 }
 
-func (m DeployerMux) Labels() map[string]string {
-	labels := make(map[string]string)
-	for _, deployer := range m {
-		copyMap(labels, deployer.Labels())
-	}
-	return labels
-}
-
-func (m DeployerMux) Deploy(ctx context.Context, w io.Writer, as []build.Artifact, ls []Labeller) *Result {
-	seenNamespaces := newStringSet()
-	for _, deployer := range m {
-		result := deployer.Deploy(ctx, w, as, ls)
-		if result.err != nil {
-			return result
+func (m DeployerMux) Deploy(ctx context.Context, w io.Writer, as []graph.Artifact, l manifest.ManifestListByConfig) error {
+	for i, deployer := range m.deployers {
+		eventV2.DeployInProgress(i)
+		w, ctx = output.WithEventContext(ctx, w, constants.Deploy, strconv.Itoa(i))
+		ctx, endTrace := instrumentation.StartTrace(ctx, "Deploy")
+		runHooks := false
+		deployHooks, ok := deployer.(deployerWithHooks)
+		if ok {
+			runHooks = deployHooks.HasRunnableHooks()
 		}
-		seenNamespaces.insert(result.Namespaces()...)
+		if runHooks {
+			if err := deployHooks.PreDeployHooks(ctx, w); err != nil {
+				return err
+			}
+		}
+		if err := deployer.Deploy(ctx, w, as, l); err != nil {
+			eventV2.DeployFailed(i, err)
+			endTrace(instrumentation.TraceEndError(err))
+			return err
+		}
+		// Always run iterative status check if there are deploy hooks.
+		// This is required otherwise the deploy hooks can get erreneously executed on older pods from a previous deployment.
+		if runHooks || m.iterativeStatusCheck {
+			if err := deployer.GetStatusMonitor().Check(ctx, w); err != nil {
+				eventV2.DeployFailed(i, err)
+				endTrace(instrumentation.TraceEndError(err))
+				return err
+			}
+		}
+		if runHooks {
+			if err := deployHooks.PostDeployHooks(ctx, w); err != nil {
+				return err
+			}
+		}
+		eventV2.DeploySucceeded(i)
+		endTrace()
 	}
-	return NewDeploySuccessResult(seenNamespaces.toList())
+
+	return nil
 }
 
 func (m DeployerMux) Dependencies() ([]string, error) {
-	deps := newStringSet()
-	for _, deployer := range m {
+	deps := stringset.New()
+	for _, deployer := range m.deployers {
 		result, err := deployer.Dependencies()
 		if err != nil {
 			return nil, err
 		}
-		deps.insert(result...)
+		deps.Insert(result...)
 	}
-	return deps.toList(), nil
+	return deps.ToList(), nil
 }
 
-func (m DeployerMux) Cleanup(ctx context.Context, w io.Writer) error {
-	for _, deployer := range m {
-		if err := deployer.Cleanup(ctx, w); err != nil {
-			return err
+func (m DeployerMux) Cleanup(ctx context.Context, w io.Writer, dryRun bool, manifestsByConfig manifest.ManifestListByConfig) error {
+	// Reverse order of deployers for cleanup to ensure resources
+	// are removed before their definitions are removed.
+	for _, deployer := range m.GetDeployersInverse() {
+		ctx, endTrace := instrumentation.StartTrace(ctx, "Cleanup")
+		if dryRun {
+			output.Yellow.Fprintln(w, "Following resources would be deleted:")
 		}
+		if err := deployer.Cleanup(ctx, w, dryRun, manifestsByConfig); err != nil {
+			output.Yellow.Fprintln(w, "Cleaning up resources encountered an error, will continue to clean up other resources.")
+		}
+		endTrace()
 	}
 	return nil
 }
 
-func (m DeployerMux) Render(ctx context.Context, w io.Writer, as []build.Artifact, ls []Labeller, offline bool, filepath string) error {
-	resources, buf := []string{}, &bytes.Buffer{}
-	for _, deployer := range m {
-		buf.Reset()
-		if err := deployer.Render(ctx, buf, as, ls, offline, "" /* never write to files */); err != nil {
-			return err
-		}
-		resources = append(resources, buf.String())
-	}
-
-	allResources := strings.Join(resources, "\n---\n")
-	return outputRenderedManifests(allResources, filepath, w)
-}
+// TrackBuildArtifacts should *only* be called on individual deployers. This is a noop.
+func (m DeployerMux) TrackBuildArtifacts(_, _ []graph.Artifact) {}

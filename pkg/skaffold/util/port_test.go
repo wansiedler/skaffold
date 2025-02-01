@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"sync/atomic"
 	"testing"
 )
 
@@ -45,21 +44,25 @@ func TestPortSet(t *testing.T) {
 }
 
 func TestGetAvailablePort(t *testing.T) {
-	var ports PortSet
-
 	N := 100
+
 	var (
-		errors int32
+		ports  PortSet
+		lock   sync.Mutex
 		wg     sync.WaitGroup
+		errors = map[int]error{}
 	)
+
 	wg.Add(N)
 	for i := 0; i < N; i++ {
 		go func() {
-			port := GetAvailablePort("127.0.0.1", 4503, &ports)
+			port := GetAvailablePort(Loopback, 4503, &ports)
 
 			l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", Loopback, port))
 			if err != nil {
-				atomic.AddInt32(&errors, 1)
+				lock.Lock()
+				errors[port] = err
+				lock.Unlock()
 			} else {
 				l.Close()
 			}
@@ -67,7 +70,8 @@ func TestGetAvailablePort(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if atomic.LoadInt32(&errors) > 0 {
-		t.Fatalf("A port that was available couldn't be used %d times", errors)
+
+	for port, err := range errors {
+		t.Errorf("available port (%d) couldn't be used: %v", port, err)
 	}
 }

@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package version
 
 import (
@@ -26,7 +27,7 @@ const VersionPrefix = "v"
 
 // The current version of the minikube
 
-// version is a private field and should be set when compiling with --ldflags="-X github.com/GoogleContainerTools/skaffold/pkg/diag/version.version=vX.Y.Z"
+// version is a private field and should be set when compiling with --ldflags="-X github.com/GoogleContainerTools/skaffold/v2/pkg/diag/version.version=vX.Y.Z"
 var version = "v0.0.0-unset"
 
 // GetVersion returns the current diag pkg version

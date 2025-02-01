@@ -20,9 +20,11 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/proto"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"google.golang.org/protobuf/testing/protocmp"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/proto/v1"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestEmptyState(t *testing.T) {
@@ -41,8 +43,8 @@ func TestEmptyState(t *testing.T) {
 				},
 				Deploy: latest.DeployConfig{
 					DeployType: latest.DeployType{
-						KubectlDeploy: &latest.KubectlDeploy{},
-						HelmDeploy:    &latest.HelmDeploy{Releases: []latest.HelmRelease{{Name: "first"}, {Name: "second"}}},
+						KubectlDeploy:    &latest.KubectlDeploy{},
+						LegacyHelmDeploy: &latest.LegacyHelmDeploy{Releases: []latest.HelmRelease{{Name: "first"}, {Name: "second"}}},
 					},
 				},
 			},
@@ -74,7 +76,7 @@ func TestEmptyState(t *testing.T) {
 				},
 				Deploy: latest.DeployConfig{
 					DeployType: latest.DeployType{
-						KustomizeDeploy: &latest.KustomizeDeploy{},
+						KubectlDeploy: &latest.KubectlDeploy{},
 					},
 				},
 			},
@@ -90,7 +92,7 @@ func TestEmptyState(t *testing.T) {
 				},
 				Deploy: &proto.DeployMetadata{
 					Cluster:   proto.ClusterType_GKE,
-					Deployers: []*proto.DeployMetadata_Deployer{{Type: proto.DeployerType_KUSTOMIZE, Count: 1}}},
+					Deployers: []*proto.DeployMetadata_Deployer{{Type: proto.DeployerType_KUBECTL, Count: 1}}},
 			},
 		},
 		{
@@ -114,22 +116,20 @@ func TestEmptyState(t *testing.T) {
 			},
 		},
 		{
-			description: "no build, kustomize deployer other cluster",
+			description: "no build, kubectl deployer other cluster",
 			cfg: latest.Pipeline{
 				Deploy: latest.DeployConfig{
 					DeployType: latest.DeployType{
-						KustomizeDeploy: &latest.KustomizeDeploy{},
+						KubectlDeploy: &latest.KubectlDeploy{},
 					},
 				},
 			},
 			cluster: "some-private",
 			expected: &proto.Metadata{
-				Build: &proto.BuildMetadata{
-					Builders: []*proto.BuildMetadata_ImageBuilder{},
-				},
+				Build: &proto.BuildMetadata{},
 				Deploy: &proto.DeployMetadata{
 					Cluster:   proto.ClusterType_OTHER,
-					Deployers: []*proto.DeployMetadata_Deployer{{Type: proto.DeployerType_KUSTOMIZE, Count: 1}},
+					Deployers: []*proto.DeployMetadata_Deployer{{Type: proto.DeployerType_KUBECTL, Count: 1}},
 				},
 			},
 		},
@@ -137,14 +137,14 @@ func TestEmptyState(t *testing.T) {
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			handler = &eventHandler{
-				state: emptyState(test.cfg, test.cluster, true, true, true),
+				state: emptyState(mockCfg([]latest.Pipeline{test.cfg}, test.cluster)),
 			}
 			metadata := handler.state.Metadata
 			builders := metadata.Build.Builders
 
 			// sort and compare
 			sort.Slice(builders, func(i, j int) bool { return builders[i].Type < builders[j].Type })
-			t.CheckDeepEqual(metadata, test.expected)
+			t.CheckDeepEqual(metadata, test.expected, protocmp.Transform())
 		})
 	}
 }

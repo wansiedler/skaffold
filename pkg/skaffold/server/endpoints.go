@@ -23,8 +23,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/event"
-	"github.com/GoogleContainerTools/skaffold/proto"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/event"
+	"github.com/GoogleContainerTools/skaffold/v2/proto/v1"
 )
 
 func (s *server) GetState(context.Context, *empty.Empty) (*proto.State, error) {
@@ -45,6 +45,14 @@ func (s *server) Handle(ctx context.Context, e *proto.Event) (*empty.Empty, erro
 }
 
 func (s *server) Execute(ctx context.Context, intent *proto.UserIntentRequest) (*empty.Empty, error) {
+	if intent.GetIntent().GetDevloop() {
+		event.ResetStateOnBuild()
+		go func() {
+			s.devloopIntentCallback()
+		}()
+		return &empty.Empty{}, nil
+	}
+
 	if intent.GetIntent().GetBuild() {
 		event.ResetStateOnBuild()
 		go func() {

@@ -18,7 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"strings"
+	"sync"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/partial"
@@ -30,12 +30,17 @@ type image struct {
 	base v1.Image
 	adds []Addendum
 
-	computed   bool
-	configFile *v1.ConfigFile
-	manifest   *v1.Manifest
-	mediaType  *types.MediaType
-	diffIDMap  map[v1.Hash]v1.Layer
-	digestMap  map[v1.Hash]v1.Layer
+	computed        bool
+	configFile      *v1.ConfigFile
+	manifest        *v1.Manifest
+	annotations     map[string]string
+	mediaType       *types.MediaType
+	configMediaType *types.MediaType
+	diffIDMap       map[v1.Hash]v1.Layer
+	digestMap       map[v1.Hash]v1.Layer
+	subject         *v1.Descriptor
+
+	sync.Mutex
 }
 
 var _ v1.Image = (*image)(nil)
@@ -48,6 +53,9 @@ func (i *image) MediaType() (types.MediaType, error) {
 }
 
 func (i *image) compute() error {
+	i.Lock()
+	defer i.Unlock()
+
 	// Don't re-compute if already computed.
 	if i.computed {
 		return nil
@@ -69,13 +77,15 @@ func (i *image) compute() error {
 	digestMap := make(map[v1.Hash]v1.Layer)
 
 	for _, add := range i.adds {
-		diffID, err := add.Layer.DiffID()
-		if err != nil {
-			return err
-		}
-		diffIDs = append(diffIDs, diffID)
 		history = append(history, add.History)
-		diffIDMap[diffID] = add.Layer
+		if add.Layer != nil {
+			diffID, err := add.Layer.DiffID()
+			if err != nil {
+				return err
+			}
+			diffIDs = append(diffIDs, diffID)
+			diffIDMap[diffID] = add.Layer
+		}
 	}
 
 	m, err := i.base.Manifest()
@@ -85,6 +95,11 @@ func (i *image) compute() error {
 	manifest := m.DeepCopy()
 	manifestLayers := manifest.Layers
 	for _, add := range i.adds {
+		if add.Layer == nil {
+			// Empty layers include only history in manifest.
+			continue
+		}
+
 		desc, err := partial.Descriptor(add.Layer)
 		if err != nil {
 			return err
@@ -96,6 +111,10 @@ func (i *image) compute() error {
 		}
 		if len(add.URLs) != 0 {
 			desc.URLs = add.URLs
+		}
+
+		if add.MediaType != "" {
+			desc.MediaType = add.MediaType
 		}
 
 		manifestLayers = append(manifestLayers, *desc)
@@ -118,15 +137,30 @@ func (i *image) compute() error {
 	manifest.Config.Digest = d
 	manifest.Config.Size = sz
 
-	// With OCI media types, this should not be set, see discussion:
-	// https://github.com/opencontainers/image-spec/pull/795
+	// If Data was set in the base image, we need to update it in the mutated image.
+	if m.Config.Data != nil {
+		manifest.Config.Data = rcfg
+	}
+
+	// If the user wants to mutate the media type of the config
+	if i.configMediaType != nil {
+		manifest.Config.MediaType = *i.configMediaType
+	}
+
 	if i.mediaType != nil {
-		if strings.Contains(string(*i.mediaType), types.OCIVendorPrefix) {
-			manifest.MediaType = ""
-		} else if strings.Contains(string(*i.mediaType), types.DockerVendorPrefix) {
-			manifest.MediaType = *i.mediaType
+		manifest.MediaType = *i.mediaType
+	}
+
+	if i.annotations != nil {
+		if manifest.Annotations == nil {
+			manifest.Annotations = map[string]string{}
+		}
+
+		for k, v := range i.annotations {
+			manifest.Annotations[k] = v
 		}
 	}
+	manifest.Subject = i.subject
 
 	i.configFile = configFile
 	i.manifest = manifest
@@ -139,7 +173,7 @@ func (i *image) compute() error {
 // Layers returns the ordered collection of filesystem layers that comprise this image.
 // The order of the list is oldest/base layer first, and most-recent/top layer last.
 func (i *image) Layers() ([]v1.Layer, error) {
-	if err := i.compute(); err == stream.ErrNotComputed {
+	if err := i.compute(); errors.Is(err, stream.ErrNotComputed) {
 		// Image contains a streamable layer which has not yet been
 		// consumed. Just return the layers we have in case the caller
 		// is going to consume the layers.
@@ -183,7 +217,7 @@ func (i *image) ConfigFile() (*v1.ConfigFile, error) {
 	if err := i.compute(); err != nil {
 		return nil, err
 	}
-	return i.configFile, nil
+	return i.configFile.DeepCopy(), nil
 }
 
 // RawConfigFile returns the serialized bytes of ConfigFile()
@@ -215,7 +249,7 @@ func (i *image) Manifest() (*v1.Manifest, error) {
 	if err := i.compute(); err != nil {
 		return nil, err
 	}
-	return i.manifest, nil
+	return i.manifest.DeepCopy(), nil
 }
 
 // RawManifest returns the serialized bytes of Manifest()
@@ -251,7 +285,7 @@ func (i *image) LayerByDiffID(h v1.Hash) (v1.Layer, error) {
 
 func validate(adds []Addendum) error {
 	for _, add := range adds {
-		if add.Layer == nil {
+		if add.Layer == nil && !add.History.EmptyLayer {
 			return errors.New("unable to add a nil layer to the image")
 		}
 	}

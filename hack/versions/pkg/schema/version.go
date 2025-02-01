@@ -18,22 +18,23 @@ package schema
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/update"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/update"
 )
 
 func GetLatestVersion() (string, bool) {
 	current := strings.TrimPrefix(latest.Version, "skaffold/")
 	logrus.Debugf("Current Skaffold version: %s", current)
 
-	config, err := ioutil.ReadFile("pkg/skaffold/schema/latest/config.go")
+	config, err := os.ReadFile("pkg/skaffold/schema/latest/config.go")
 	if err != nil {
 		logrus.Fatalf("failed to read latest config: %s", err)
 	}
@@ -43,30 +44,50 @@ func GetLatestVersion() (string, bool) {
 	}
 
 	logrus.Infof("Checking for released status of %s...", current)
-	lastReleased := getLastReleasedConfigVersion()
+	lastReleased := GetLastReleasedVersion()
 	logrus.Infof("Last released version: %s", lastReleased)
 
 	latestIsReleased := lastReleased == current
 	return current, latestIsReleased
 }
 
-func getLastReleasedConfigVersion() string {
+func GetLastReleasedVersion() string {
 	lastTag, err := update.DownloadLatestVersion()
 	if err != nil {
 		logrus.Fatalf("error getting latest version: %s", err)
 	}
 	logrus.Infof("last release tag: %s", lastTag)
-	configURL := fmt.Sprintf("https://raw.githubusercontent.com/GoogleContainerTools/skaffold/%s/pkg/skaffold/schema/latest/config.go", lastTag)
-	resp, err := http.Get(configURL)
-	if err != nil {
-		logrus.Fatalf("can't determine latest released config version, failed to download %s: %s", configURL, err)
+	// we split the config in v1.25.0
+	for _, url := range []string{
+		fmt.Sprintf("https://raw.githubusercontent.com/GoogleContainerTools/skaffold/%s/pkg/skaffold/schema/latest/config.go", lastTag),
+	} {
+		resp, err := http.Get(url)
+		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			defer resp.Body.Close()
+			config, err := io.ReadAll(resp.Body)
+			if err != nil {
+				logrus.Fatalf("failed to fetch config for %s, err: %s", lastTag, err)
+			}
+			versionPattern := regexp.MustCompile("const Version string = \"skaffold/(.*)\"")
+			lastReleased := versionPattern.FindStringSubmatch(string(config))[1]
+			return lastReleased
+		}
 	}
-	defer resp.Body.Close()
-	config, err := ioutil.ReadAll(resp.Body)
+	logrus.Fatalf("can't determine latest released config version, failed to download %s: %s", lastTag, err)
+	return ""
+}
+
+// IsReleased takes a filepath to a skaffold config in pkg/skaffold/schema and returns true if it's released and false if otherwise.
+func IsReleased(filepath string) (bool, error) {
+	b, err := os.ReadFile(filepath)
 	if err != nil {
-		logrus.Fatalf("failed to read during download %s, err: %s", configURL, err)
+		return false, err
 	}
-	versionPattern := regexp.MustCompile("const Version string = \"skaffold/(.*)\"")
-	lastReleased := versionPattern.FindStringSubmatch(string(config))[1]
-	return lastReleased
+
+	s := string(b)
+	if strings.Contains(s, releasedComment) {
+		return true, nil
+	}
+
+	return false, nil
 }

@@ -20,8 +20,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/mitchellh/go-homedir"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestExpandPathsGlob(t *testing.T) {
@@ -279,23 +281,147 @@ func TestIsHiddenFile(t *testing.T) {
 	}
 }
 
-func TestRemoveFromSlice(t *testing.T) {
-	testutil.CheckDeepEqual(t, []string{""}, RemoveFromSlice([]string{""}, "ANY"))
-	testutil.CheckDeepEqual(t, []string{"A", "B", "C"}, RemoveFromSlice([]string{"A", "B", "C"}, "ANY"))
-	testutil.CheckDeepEqual(t, []string{"A", "C"}, RemoveFromSlice([]string{"A", "B", "C"}, "B"))
-	testutil.CheckDeepEqual(t, []string{"B", "C"}, RemoveFromSlice([]string{"A", "B", "C"}, "A"))
-	testutil.CheckDeepEqual(t, []string{"A", "C"}, RemoveFromSlice([]string{"A", "B", "B", "C"}, "B"))
-	testutil.CheckDeepEqual(t, []string{}, RemoveFromSlice([]string{"B", "B"}, "B"))
+func TestEnvMapToSlice(t *testing.T) {
+	tests := []struct {
+		description string
+		args        map[string]string
+		expected    []string
+	}{
+		{
+			description: "regular key:value",
+			args: map[string]string{
+				"one": "1",
+				"two": "2",
+			},
+			expected: []string{"one=1", "two=2"},
+		}, {
+			description: "empty key:value",
+			args: map[string]string{
+				"one": "",
+				"two": "",
+			},
+			expected: []string{"one=", "two="},
+		},
+	}
+
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			actual := EnvMapToSlice(test.args, "=")
+
+			t.CheckDeepEqual(test.expected, actual)
+		})
+	}
 }
 
-func TestStrSliceInsert(t *testing.T) {
-	testutil.CheckDeepEqual(t, []string{"d", "e"}, StrSliceInsert(nil, 0, []string{"d", "e"}))
-	testutil.CheckDeepEqual(t, []string{"d", "e"}, StrSliceInsert([]string{}, 0, []string{"d", "e"}))
-	testutil.CheckDeepEqual(t, []string{"a", "d", "e", "b", "c"}, StrSliceInsert([]string{"a", "b", "c"}, 1, []string{"d", "e"}))
-	testutil.CheckDeepEqual(t, []string{"d", "e", "a", "b", "c"}, StrSliceInsert([]string{"a", "b", "c"}, 0, []string{"d", "e"}))
-	testutil.CheckDeepEqual(t, []string{"a", "b", "c", "d", "e"}, StrSliceInsert([]string{"a", "b", "c"}, 3, []string{"d", "e"}))
-	testutil.CheckDeepEqual(t, []string{"a", "b", "c"}, StrSliceInsert([]string{"a", "b", "c"}, 0, nil))
-	testutil.CheckDeepEqual(t, []string{"a", "b", "c"}, StrSliceInsert([]string{"a", "b", "c"}, 1, nil))
+func TestMapPtrToSlice(t *testing.T) {
+	tests := []struct {
+		description string
+		args        map[string]*string
+		expected    []string
+	}{
+		{
+			description: "regular key:value",
+			args: map[string]*string{
+				"one": Ptr("1"),
+				"two": Ptr("2"),
+			},
+			expected: []string{"one=1", "two=2"},
+		}, {
+			description: "empty key:value",
+			args: map[string]*string{
+				"one": Ptr(""),
+				"two": Ptr(""),
+			},
+			expected: []string{"one=", "two="},
+		}, {
+			description: "nil value",
+			args: map[string]*string{
+				"one": nil,
+				"two": nil,
+			},
+			expected: []string{"one", "two"},
+		},
+	}
+
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			actual := EnvPtrMapToSlice(test.args, "=")
+
+			t.CheckDeepEqual(test.expected, actual)
+		})
+	}
+}
+
+func TestEnvSliceToMap(t *testing.T) {
+	tests := []struct {
+		description string
+		args        []string
+		expected    map[string]string
+	}{
+		{
+			description: "regular key=value",
+			args:        []string{"one=1", "two=2"},
+			expected:    map[string]string{"one": "1", "two": "2"},
+		},
+		{
+			description: "empty key=",
+			args:        []string{"one=", "two="},
+			expected:    map[string]string{"one": "", "two": ""},
+		},
+		{
+			description: "last repeated key wins",
+			args:        []string{"one=a", "one=b"},
+			expected:    map[string]string{"one": "b"},
+		},
+		{
+			description: "elements missing separator is dropped",
+			args:        []string{"one", "two=2"},
+			expected:    map[string]string{"two": "2"},
+		},
+	}
+
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			actual := EnvSliceToMap(test.args, "=")
+
+			t.CheckDeepEqual(test.expected, actual)
+		})
+	}
+}
+
+func TestIsSubPath(t *testing.T) {
+	home, _ := homedir.Dir()
+	tests := []struct {
+		description string
+		basePath    string
+		targetPath  string
+		expected    bool
+	}{
+		{
+			description: "target path within base path",
+			basePath:    filepath.Join(home, ".minikube"),
+			targetPath:  filepath.Join(home, ".minikube", "ca.crt"),
+			expected:    true,
+		},
+		{
+			description: "target path outside base path",
+			basePath:    filepath.Join(home, "bar"),
+			targetPath:  filepath.Join(home, "foo", "bar"),
+			expected:    false,
+		},
+		{
+			description: "base path inside target path",
+			basePath:    filepath.Join(home, "foo", "bar"),
+			targetPath:  filepath.Join(home, "foo"),
+			expected:    false,
+		},
+	}
+
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			t.CheckDeepEqual(test.expected, IsSubPath(test.basePath, test.targetPath))
+		})
+	}
 }
 
 func TestIsFileIsDir(t *testing.T) {
@@ -309,4 +435,51 @@ func TestIsFileIsDir(t *testing.T) {
 
 	testutil.CheckDeepEqual(t, false, IsFile(filepath.Join(tmpDir.Root(), "nonexistent")))
 	testutil.CheckDeepEqual(t, false, IsDir(filepath.Join(tmpDir.Root(), "nonexistent")))
+}
+
+func TestIsURL(t *testing.T) {
+	testutil.CheckDeepEqual(t, false, IsURL("foo"))
+	testutil.CheckDeepEqual(t, false, IsURL("http:bar"))
+	testutil.CheckDeepEqual(t, false, IsURL("https:bar"))
+
+	testutil.CheckDeepEqual(t, true, IsURL("http://bar"))
+	testutil.CheckDeepEqual(t, true, IsURL("https://bar"))
+}
+
+func TestIsEmptyDir(t *testing.T) {
+	tmpDir := testutil.NewTempDir(t).Touch("file")
+	emptyTmpDir := testutil.NewTempDir(t)
+
+	testutil.CheckDeepEqual(t, true, IsEmptyDir(emptyTmpDir.Root()))
+	testutil.CheckDeepEqual(t, false, IsEmptyDir(tmpDir.Root()))
+	testutil.CheckDeepEqual(t, false, IsEmptyDir(filepath.Join(tmpDir.Root(), "file")))
+}
+
+func TestParseEnvVariablesFromFile(t *testing.T) {
+	tests := []struct {
+		description string
+		text        string
+		expected    map[string]string
+		shouldErr   bool
+	}{
+		{
+			description: "parsing dotenv file text works and expected map was created",
+			text:        "FOO=my-foo-var",
+			expected:    map[string]string{"FOO": "my-foo-var"},
+			shouldErr:   false,
+		},
+		{
+			description: "parsing dotenv file fails works as file is malformed",
+			text:        "!=MALFORMED",
+			shouldErr:   true,
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			tmpfile := t.TempFile("", []byte(test.text))
+			envMap, err := ParseEnvVariablesFromFile(tmpfile)
+			t.CheckError(test.shouldErr, err)
+			t.CheckDeepEqual(test.expected, envMap)
+		})
+	}
 }

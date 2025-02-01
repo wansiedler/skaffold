@@ -18,22 +18,28 @@ package bazel
 
 import (
 	"context"
-	"io/ioutil"
+	"fmt"
+	"io"
+	"path/filepath"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	specs "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestBuildBazel(t *testing.T) {
 	testutil.Run(t, "", func(t *testutil.T) {
 		t.NewTempDir().Mkdir("bin").Chdir()
-		t.Override(&util.DefaultExecCommand, testutil.CmdRun("bazel build //:app.tar").AndRunOut("bazel info bazel-bin", "bin"))
+		t.Override(&util.DefaultExecCommand, testutil.CmdRun("bazel build //:app.tar --color=no").AndRunOut(
+			"bazel cquery //:app.tar --output starlark --starlark:expr target.files.to_list()[0].path",
+			"bin/app.tar").AndRunOut("bazel info execution_root", ""))
 		testutil.CreateFakeImageTar("bazel:app", "bin/app.tar")
 
-		localDocker := docker.NewLocalDaemon(&testutil.FakeAPIClient{}, nil, false, nil)
 		artifact := &latest.Artifact{
 			Workspace: ".",
 			ArtifactType: latest.ArtifactType{
@@ -43,8 +49,62 @@ func TestBuildBazel(t *testing.T) {
 			},
 		}
 
-		builder := NewArtifactBuilder(localDocker, nil, false)
-		_, err := builder.Build(context.Background(), ioutil.Discard, artifact, "img:tag")
+		builder := NewArtifactBuilder(fakeLocalDaemon(), &mockConfig{}, false)
+		_, err := builder.Build(context.Background(), io.Discard, artifact, "img:tag", platform.Matcher{})
+
+		t.CheckNoError(err)
+	})
+}
+
+func TestBazelTarPathPrependExecutionRoot(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		t.Override(&util.DefaultExecCommand, testutil.CmdRun("bazel build //:app.tar --color=no").AndRunOut(
+			"bazel cquery //:app.tar --output starlark --starlark:expr target.files.to_list()[0].path",
+			"app.tar").AndRunOut("bazel info execution_root", ".."))
+		testutil.CreateFakeImageTar("bazel:app", "../app.tar")
+
+		artifact := &latest.Artifact{
+			Workspace: "..",
+			ArtifactType: latest.ArtifactType{
+				BazelArtifact: &latest.BazelArtifact{
+					BuildTarget: "//:app.tar",
+				},
+			},
+		}
+
+		builder := NewArtifactBuilder(fakeLocalDaemon(), &mockConfig{}, false)
+		_, err := builder.Build(context.Background(), io.Discard, artifact, "img:tag", platform.Matcher{})
+
+		t.CheckNoError(err)
+	})
+}
+
+func TestBazelAddPlatforms(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		t.Override(&util.DefaultExecCommand, testutil.CmdRun("bazel build //:app.tar --platforms=//platforms:linux-x86_64 --color=no").AndRunOut(
+			"bazel cquery //:app.tar --output starlark --starlark:expr target.files.to_list()[0].path",
+			"app.tar").AndRunOut("bazel info execution_root", ".."))
+		testutil.CreateFakeImageTar("bazel:app", "../app.tar")
+
+		artifact := &latest.Artifact{
+			Workspace: "..",
+			ArtifactType: latest.ArtifactType{
+				BazelArtifact: &latest.BazelArtifact{
+					BuildTarget: "//:app.tar",
+					PlatformMappings: []latest.BazelPlatformMapping{
+						{
+							Platform:            "linux/amd64",
+							BazelPlatformTarget: "//platforms:linux-x86_64",
+						},
+					},
+				},
+			},
+		}
+
+		testPlatform := platform.Matcher{Platforms: []specs.Platform{{Architecture: "amd64", OS: "linux"}}}
+
+		builder := NewArtifactBuilder(fakeLocalDaemon(), &mockConfig{}, false)
+		_, err := builder.Build(context.Background(), io.Discard, artifact, "img:tag", testPlatform)
 
 		t.CheckNoError(err)
 	})
@@ -60,41 +120,53 @@ func TestBuildBazelFailInvalidTarget(t *testing.T) {
 			},
 		}
 
-		builder := NewArtifactBuilder(nil, nil, false)
-		_, err := builder.Build(context.Background(), ioutil.Discard, artifact, "img:tag")
+		builder := NewArtifactBuilder(nil, &mockConfig{}, false)
+		_, err := builder.Build(context.Background(), io.Discard, artifact, "img:tag", platform.Matcher{})
 
 		t.CheckErrorContains("the bazel build target should end with .tar", err)
 	})
 }
 
-func TestBazelBin(t *testing.T) {
-	testutil.Run(t, "", func(t *testutil.T) {
+func TestBazelTarPath(t *testing.T) {
+	testutil.Run(t, "EmptyExecutionRoot", func(t *testutil.T) {
+		osSpecificPath := filepath.Join("absolute", "path", "bin")
 		t.Override(&util.DefaultExecCommand, testutil.CmdRunOut(
-			"bazel info bazel-bin --arg1 --arg2",
-			"/absolute/path/bin\n",
-		))
+			"bazel cquery //:skaffold_example.tar --output starlark --starlark:expr target.files.to_list()[0].path --arg1 --arg2",
+			fmt.Sprintf("%s\n", osSpecificPath),
+		).AndRunOut("bazel info execution_root", ""))
 
-		bazelBin, err := bazelBin(context.Background(), ".", &latest.BazelArtifact{
-			BuildArgs: []string{"--arg1", "--arg2"},
+		bazelBin, err := bazelTarPath(context.Background(), ".", &latest.BazelArtifact{
+			BuildArgs:   []string{"--arg1", "--arg2"},
+			BuildTarget: "//:skaffold_example.tar",
 		})
 
 		t.CheckNoError(err)
-		t.CheckDeepEqual("/absolute/path/bin", bazelBin)
+		t.CheckDeepEqual(osSpecificPath, bazelBin)
+	})
+	testutil.Run(t, "AbsoluteExecutionRoot", func(t *testutil.T) {
+		osSpecificPath := filepath.Join("var", "tmp", "bazel-execution-roots", "abcdefg", "execroot", "workspace_name")
+		t.Override(&util.DefaultExecCommand, testutil.CmdRunOut(
+			"bazel cquery //:skaffold_example.tar --output starlark --starlark:expr target.files.to_list()[0].path --arg1 --arg2",
+			"bazel-bin/darwin-fastbuild-ST-confighash/path/to/bin\n",
+		).AndRunOut("bazel info execution_root", osSpecificPath))
+
+		bazelBin, err := bazelTarPath(context.Background(), ".", &latest.BazelArtifact{
+			BuildArgs:   []string{"--arg1", "--arg2"},
+			BuildTarget: "//:skaffold_example.tar",
+		})
+
+		t.CheckNoError(err)
+		expected := filepath.Join(osSpecificPath, "bazel-bin", "darwin-fastbuild-ST-confighash", "path", "to", "bin")
+		t.CheckDeepEqual(expected, bazelBin)
 	})
 }
 
-func TestBuildTarPath(t *testing.T) {
-	buildTarget := "//:skaffold_example.tar"
-
-	tarPath := buildTarPath(buildTarget)
-
-	testutil.CheckDeepEqual(t, "skaffold_example.tar", tarPath)
+func fakeLocalDaemon() docker.LocalDaemon {
+	return docker.NewLocalDaemon(&testutil.FakeAPIClient{}, nil, false, nil)
 }
 
-func TestBuildImageTag(t *testing.T) {
-	buildTarget := "//:skaffold_example.tar"
-
-	imageTag := buildImageTag(buildTarget)
-
-	testutil.CheckDeepEqual(t, "bazel:skaffold_example", imageTag)
+type mockConfig struct {
+	docker.Config
 }
+
+func (c *mockConfig) GetInsecureRegistries() map[string]bool { return nil }

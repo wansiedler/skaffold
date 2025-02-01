@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Skaffold Authors
+Copyright 2021 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,8 +19,22 @@ package runner
 import (
 	"context"
 	"io"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/manifest"
 )
 
-func (r *SkaffoldRunner) Cleanup(ctx context.Context, out io.Writer) error {
-	return r.deployer.Cleanup(ctx, out)
+func (r *SkaffoldRunner) Cleanup(ctx context.Context, out io.Writer, dryRun bool, manifestListByConfig manifest.ManifestListByConfig, command string) error {
+	var err error
+	if command == "verify" {
+		err = r.verifier.Cleanup(ctx, out, dryRun)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	err = r.deployer.Cleanup(ctx, out, dryRun, manifestListByConfig)
+	if err != nil {
+		return err
+	}
+	return nil
 }

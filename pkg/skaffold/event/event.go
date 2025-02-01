@@ -17,16 +17,25 @@ limitations under the License.
 package event
 
 import (
-	"encoding/json"
+	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 
-	"github.com/golang/protobuf/ptypes"
+	//nolint:golint,staticcheck
+	"github.com/golang/protobuf/jsonpb"
+	pbuf "github.com/golang/protobuf/proto"
+	"github.com/golang/protobuf/ptypes/timestamp"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
-	sErrors "github.com/GoogleContainerTools/skaffold/pkg/skaffold/errors"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/version"
-	"github.com/GoogleContainerTools/skaffold/proto"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/constants"
+	sErrors "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/errors"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/instrumentation"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/version"
+	"github.com/GoogleContainerTools/skaffold/v2/proto/v1"
 )
 
 const (
@@ -38,18 +47,42 @@ const (
 	Started    = "Started"
 	Succeeded  = "Succeeded"
 	Terminated = "Terminated"
+	Canceled   = "Canceled"
 )
 
-var handler = &eventHandler{}
+var handler = newHandler()
+
+func newHandler() *eventHandler {
+	h := &eventHandler{
+		eventChan: make(chan firedEvent),
+		state:     &proto.State{},
+	}
+	go func() {
+		for {
+			ev, open := <-h.eventChan
+			if !open {
+				break
+			}
+			h.handleExec(ev)
+		}
+	}()
+	return h
+}
 
 type eventHandler struct {
-	eventLog []proto.LogEntry
+	eventLog []*proto.LogEntry
 	logLock  sync.Mutex
+	cfg      Config
 
-	state     proto.State
+	state     *proto.State
 	stateLock sync.Mutex
-
+	eventChan chan firedEvent
 	listeners []*listener
+}
+
+type firedEvent struct {
+	event *proto.Event
+	ts    *timestamp.Timestamp
 }
 
 type listener struct {
@@ -59,8 +92,7 @@ type listener struct {
 }
 
 func GetState() (*proto.State, error) {
-	state := handler.getState()
-	return &state, nil
+	return handler.getState(), nil
 }
 
 func ForEachEvent(callback func(*proto.LogEntry) error) error {
@@ -74,19 +106,14 @@ func Handle(event *proto.Event) error {
 	return nil
 }
 
-func (ev *eventHandler) getState() proto.State {
+func (ev *eventHandler) getState() *proto.State {
 	ev.stateLock.Lock()
-	// Deep copy
-	buf, _ := json.Marshal(ev.state)
+	state := pbuf.Clone(ev.state).(*proto.State)
 	ev.stateLock.Unlock()
-
-	var state proto.State
-	json.Unmarshal(buf, &state)
-
 	return state
 }
 
-func (ev *eventHandler) logEvent(entry proto.LogEntry) {
+func (ev *eventHandler) logEvent(entry *proto.LogEntry) {
 	ev.logLock.Lock()
 
 	for _, listener := range ev.listeners {
@@ -94,7 +121,7 @@ func (ev *eventHandler) logEvent(entry proto.LogEntry) {
 			continue
 		}
 
-		if err := listener.callback(&entry); err != nil {
+		if err := listener.callback(entry); err != nil {
 			listener.errors <- err
 			listener.closed = true
 		}
@@ -112,14 +139,14 @@ func (ev *eventHandler) forEachEvent(callback func(*proto.LogEntry) error) error
 
 	ev.logLock.Lock()
 
-	oldEvents := make([]proto.LogEntry, len(ev.eventLog))
+	oldEvents := make([]*proto.LogEntry, len(ev.eventLog))
 	copy(oldEvents, ev.eventLog)
 	ev.listeners = append(ev.listeners, listener)
 
 	ev.logLock.Unlock()
 
 	for i := range oldEvents {
-		if err := callback(&oldEvents[i]); err != nil {
+		if err := callback(oldEvents[i]); err != nil {
 			// listener should maybe be closed
 			return err
 		}
@@ -128,21 +155,27 @@ func (ev *eventHandler) forEachEvent(callback func(*proto.LogEntry) error) error
 	return <-listener.errors
 }
 
-func emptyState(p latest.Pipeline, kubeContext string, autoBuild, autoDeploy, autoSync bool) proto.State {
+func emptyState(cfg Config) *proto.State {
 	builds := map[string]string{}
-	for _, a := range p.Build.Artifacts {
-		builds[a.ImageName] = NotStarted
+	for _, p := range cfg.GetPipelines() {
+		for _, a := range p.Build.Artifacts {
+			builds[a.ImageName] = NotStarted
+		}
 	}
-	metadata := initializeMetadata(p, kubeContext)
-	return emptyStateWithArtifacts(builds, metadata, autoBuild, autoDeploy, autoSync)
+	metadata := initializeMetadata(cfg.GetPipelines(), cfg.GetKubeContext())
+	return emptyStateWithArtifacts(builds, metadata, cfg.AutoBuild(), cfg.AutoDeploy(), cfg.AutoSync())
 }
 
-func emptyStateWithArtifacts(builds map[string]string, metadata *proto.Metadata, autoBuild, autoDeploy, autoSync bool) proto.State {
-	return proto.State{
+func emptyStateWithArtifacts(builds map[string]string, metadata *proto.Metadata, autoBuild, autoDeploy, autoSync bool) *proto.State {
+	return &proto.State{
 		BuildState: &proto.BuildState{
 			Artifacts:   builds,
 			AutoTrigger: autoBuild,
 			StatusCode:  proto.StatusCode_OK,
+		},
+		TestState: &proto.TestState{
+			Status:     NotStarted,
+			StatusCode: proto.StatusCode_OK,
 		},
 		DeployState: &proto.DeployState{
 			Status:      NotStarted,
@@ -160,8 +193,9 @@ func emptyStateWithArtifacts(builds map[string]string, metadata *proto.Metadata,
 }
 
 // InitializeState instantiates the global state of the skaffold runner, as well as the event log.
-func InitializeState(c latest.Pipeline, kc string, autoBuild, autoDeploy, autoSync bool) {
-	handler.setState(emptyState(c, kc, autoBuild, autoDeploy, autoSync))
+func InitializeState(cfg Config) {
+	handler.cfg = cfg
+	handler.setState(emptyState(cfg))
 }
 
 // DeployInProgress notifies that a deployment has been started.
@@ -171,7 +205,7 @@ func DeployInProgress() {
 
 // DeployFailed notifies that non-fatal errors were encountered during a deployment.
 func DeployFailed(err error) {
-	aiErr := sErrors.ActionableErr(sErrors.Deploy, err)
+	aiErr := sErrors.ActionableErr(handler.cfg, constants.Deploy, err)
 	handler.stateLock.Lock()
 	handler.state.DeployState.StatusCode = aiErr.ErrCode
 	handler.stateLock.Unlock()
@@ -231,7 +265,7 @@ func StatusCheckEventInProgress(s string) {
 	})
 }
 
-func ResourceStatusCheckEventCompleted(r string, ae proto.ActionableErr) {
+func ResourceStatusCheckEventCompleted(r string, ae *proto.ActionableErr) {
 	if ae.ErrCode != proto.StatusCode_STATUSCHECK_SUCCESS {
 		resourceStatusCheckEventFailed(r, ae)
 		return
@@ -248,23 +282,23 @@ func resourceStatusCheckEventSucceeded(r string) {
 	})
 }
 
-func resourceStatusCheckEventFailed(r string, ae proto.ActionableErr) {
+func resourceStatusCheckEventFailed(r string, ae *proto.ActionableErr) {
 	handler.handleResourceStatusCheckEvent(&proto.ResourceStatusCheckEvent{
 		Resource:      r,
 		Status:        Failed,
 		Err:           ae.Message,
 		StatusCode:    ae.ErrCode,
-		ActionableErr: &ae,
+		ActionableErr: ae,
 	})
 }
 
-func ResourceStatusCheckEventUpdated(r string, ae proto.ActionableErr) {
+func ResourceStatusCheckEventUpdated(r string, ae *proto.ActionableErr) {
 	handler.handleResourceStatusCheckEvent(&proto.ResourceStatusCheckEvent{
 		Resource:      r,
 		Status:        InProgress,
 		Message:       ae.Message,
 		StatusCode:    ae.ErrCode,
-		ActionableErr: &ae,
+		ActionableErr: ae,
 	})
 }
 
@@ -277,27 +311,72 @@ func DeployComplete() {
 }
 
 // BuildInProgress notifies that a build has been started.
-func BuildInProgress(imageName string) {
-	handler.handleBuildEvent(&proto.BuildEvent{Artifact: imageName, Status: InProgress})
+func BuildInProgress(imageName, platforms string) {
+	handler.handleBuildEvent(&proto.BuildEvent{
+		Artifact:        imageName,
+		TargetPlatforms: platforms,
+		HostPlatform:    platform.Host.String(),
+		Status:          InProgress,
+	})
+}
+
+// BuildCanceled notifies that a build has been canceled.
+func BuildCanceled(imageName, platforms string) {
+	handler.handleBuildEvent(&proto.BuildEvent{
+		Artifact:        imageName,
+		TargetPlatforms: platforms,
+		HostPlatform:    platform.Host.String(),
+		Status:          Canceled,
+	})
 }
 
 // BuildFailed notifies that a build has failed.
-func BuildFailed(imageName string, err error) {
-	aiErr := sErrors.ActionableErr(sErrors.Build, err)
-	handler.stateLock.Lock()
-	handler.state.BuildState.StatusCode = aiErr.ErrCode
-	handler.stateLock.Unlock()
+func BuildFailed(imageName, platforms string, err error) {
+	aiErr := sErrors.ActionableErr(handler.cfg, constants.Build, err)
 	handler.handleBuildEvent(&proto.BuildEvent{
-		Artifact:      imageName,
-		Status:        Failed,
-		Err:           err.Error(),
-		ErrCode:       aiErr.ErrCode,
-		ActionableErr: aiErr})
+		Artifact:        imageName,
+		TargetPlatforms: platforms,
+		HostPlatform:    platform.Host.String(),
+		Status:          Failed,
+		Err:             err.Error(),
+		ErrCode:         aiErr.ErrCode,
+		ActionableErr:   aiErr,
+	})
 }
 
 // BuildComplete notifies that a build has completed.
-func BuildComplete(imageName string) {
-	handler.handleBuildEvent(&proto.BuildEvent{Artifact: imageName, Status: Complete})
+func BuildComplete(imageName, platforms string) {
+	handler.handleBuildEvent(&proto.BuildEvent{
+		Artifact:        imageName,
+		TargetPlatforms: platforms,
+		HostPlatform:    platform.Host.String(),
+		Status:          Complete,
+	})
+}
+
+// TestInProgress notifies that a test has been started.
+func TestInProgress() {
+	handler.handleTestEvent(&proto.TestEvent{Status: InProgress})
+}
+
+// TestCanceled notifies that a test has been canceled.
+func TestCanceled() {
+	handler.handleTestEvent(&proto.TestEvent{Status: Canceled})
+}
+
+// TestFailed notifies that a test has failed.
+func TestFailed(imageName string, err error) {
+	aiErr := sErrors.ActionableErr(handler.cfg, constants.Test, err)
+	handler.stateLock.Lock()
+	handler.state.TestState.StatusCode = aiErr.ErrCode
+	handler.stateLock.Unlock()
+	handler.handleTestEvent(&proto.TestEvent{Status: Failed,
+		ActionableErr: aiErr})
+}
+
+// TestComplete notifies that a test has completed.
+func TestComplete() {
+	handler.handleTestEvent(&proto.TestEvent{Status: Complete})
 }
 
 // DevLoopInProgress notifies that a dev loop has been started.
@@ -307,6 +386,7 @@ func DevLoopInProgress(i int) {
 
 // DevLoopFailed notifies that a dev loop has failed with an error code
 func DevLoopFailedWithErrorCode(i int, statusCode proto.StatusCode, err error) {
+	instrumentation.AddDevIterationErr(i, statusCode)
 	ai := &proto.ActionableErr{
 		ErrCode: statusCode,
 		Message: err.Error(),
@@ -318,21 +398,23 @@ func DevLoopFailedWithErrorCode(i int, statusCode proto.StatusCode, err error) {
 }
 
 // DevLoopFailed notifies that a dev loop has failed in a given phase
-func DevLoopFailedInPhase(iteration int, phase sErrors.Phase, err error) {
+func DevLoopFailedInPhase(iteration int, phase constants.Phase, err error) {
 	state := handler.getState()
 	switch phase {
-	case sErrors.Deploy:
+	case constants.Deploy:
 		if state.DeployState.StatusCode != proto.StatusCode_DEPLOY_SUCCESS {
 			DevLoopFailedWithErrorCode(iteration, state.DeployState.StatusCode, err)
 		} else {
 			DevLoopFailedWithErrorCode(iteration, state.StatusCheckState.StatusCode, err)
 		}
-	case sErrors.StatusCheck:
+	case constants.StatusCheck:
 		DevLoopFailedWithErrorCode(iteration, state.StatusCheckState.StatusCode, err)
-	case sErrors.Build:
+	case constants.Build:
 		DevLoopFailedWithErrorCode(iteration, state.BuildState.StatusCode, err)
+	case constants.Test:
+		DevLoopFailedWithErrorCode(iteration, state.TestState.StatusCode, err)
 	default:
-		ai := sErrors.ActionableErr(phase, err)
+		ai := sErrors.ActionableErr(handler.cfg, phase, err)
 		DevLoopFailedWithErrorCode(iteration, ai.ErrCode, err)
 	}
 }
@@ -349,7 +431,7 @@ func FileSyncInProgress(fileCount int, image string) {
 
 // FileSyncFailed notifies that a file sync has failed.
 func FileSyncFailed(fileCount int, image string, err error) {
-	aiErr := sErrors.ActionableErr(sErrors.FileSync, err)
+	aiErr := sErrors.ActionableErr(handler.cfg, constants.Sync, err)
 	handler.handleFileSyncEvent(&proto.FileSyncEvent{FileCount: int32(fileCount), Image: image, Status: Failed,
 		Err: err.Error(), ErrCode: aiErr.ErrCode, ActionableErr: aiErr})
 }
@@ -360,27 +442,35 @@ func FileSyncSucceeded(fileCount int, image string) {
 }
 
 // PortForwarded notifies that a remote port has been forwarded locally.
-func PortForwarded(localPort, remotePort int32, podName, containerName, namespace string, portName string, resourceType, resourceName, address string) {
-	go handler.handle(&proto.Event{
+func PortForwarded(localPort int32, remotePort util.IntOrString, podName, containerName, namespace string, portName string, resourceType, resourceName, address string) {
+	event := proto.PortEvent{
+		LocalPort:     localPort,
+		PodName:       podName,
+		ContainerName: containerName,
+		Namespace:     namespace,
+		PortName:      portName,
+		ResourceType:  resourceType,
+		ResourceName:  resourceName,
+		Address:       address,
+		TargetPort: &proto.IntOrString{
+			Type:   int32(remotePort.Type),
+			IntVal: int32(remotePort.IntVal),
+			StrVal: remotePort.StrVal,
+		},
+	}
+	if remotePort.Type == util.Int {
+		event.RemotePort = int32(remotePort.IntVal)
+	}
+	handler.handle(&proto.Event{
 		EventType: &proto.Event_PortEvent{
-			PortEvent: &proto.PortEvent{
-				LocalPort:     localPort,
-				RemotePort:    remotePort,
-				PodName:       podName,
-				ContainerName: containerName,
-				Namespace:     namespace,
-				PortName:      portName,
-				ResourceType:  resourceType,
-				ResourceName:  resourceName,
-				Address:       address,
-			},
+			PortEvent: &event,
 		},
 	})
 }
 
 // DebuggingContainerStarted notifies that a debuggable container has appeared.
 func DebuggingContainerStarted(podName, containerName, namespace, artifact, runtime, workingDir string, debugPorts map[string]uint32) {
-	go handler.handle(&proto.Event{
+	handler.handle(&proto.Event{
 		EventType: &proto.Event_DebuggingContainerEvent{
 			DebuggingContainerEvent: &proto.DebuggingContainerEvent{
 				Status:        Started,
@@ -398,7 +488,7 @@ func DebuggingContainerStarted(podName, containerName, namespace, artifact, runt
 
 // DebuggingContainerTerminated notifies that a debuggable container has disappeared.
 func DebuggingContainerTerminated(podName, containerName, namespace, artifact, runtime, workingDir string, debugPorts map[string]uint32) {
-	go handler.handle(&proto.Event{
+	handler.handle(&proto.Event{
 		EventType: &proto.Event_DebuggingContainerEvent{
 			DebuggingContainerEvent: &proto.DebuggingContainerEvent{
 				Status:        Terminated,
@@ -414,14 +504,14 @@ func DebuggingContainerTerminated(podName, containerName, namespace, artifact, r
 	})
 }
 
-func (ev *eventHandler) setState(state proto.State) {
+func (ev *eventHandler) setState(state *proto.State) {
 	ev.stateLock.Lock()
 	ev.state = state
 	ev.stateLock.Unlock()
 }
 
 func (ev *eventHandler) handleDeployEvent(e *proto.DeployEvent) {
-	go ev.handle(&proto.Event{
+	ev.handle(&proto.Event{
 		EventType: &proto.Event_DeployEvent{
 			DeployEvent: e,
 		},
@@ -429,7 +519,7 @@ func (ev *eventHandler) handleDeployEvent(e *proto.DeployEvent) {
 }
 
 func (ev *eventHandler) handleStatusCheckEvent(e *proto.StatusCheckEvent) {
-	go ev.handle(&proto.Event{
+	ev.handle(&proto.Event{
 		EventType: &proto.Event_StatusCheckEvent{
 			StatusCheckEvent: e,
 		},
@@ -437,7 +527,7 @@ func (ev *eventHandler) handleStatusCheckEvent(e *proto.StatusCheckEvent) {
 }
 
 func (ev *eventHandler) handleResourceStatusCheckEvent(e *proto.ResourceStatusCheckEvent) {
-	go ev.handle(&proto.Event{
+	ev.handle(&proto.Event{
 		EventType: &proto.Event_ResourceStatusCheckEvent{
 			ResourceStatusCheckEvent: e,
 		},
@@ -445,15 +535,23 @@ func (ev *eventHandler) handleResourceStatusCheckEvent(e *proto.ResourceStatusCh
 }
 
 func (ev *eventHandler) handleBuildEvent(e *proto.BuildEvent) {
-	go ev.handle(&proto.Event{
+	ev.handle(&proto.Event{
 		EventType: &proto.Event_BuildEvent{
 			BuildEvent: e,
 		},
 	})
 }
 
+func (ev *eventHandler) handleTestEvent(e *proto.TestEvent) {
+	ev.handle(&proto.Event{
+		EventType: &proto.Event_TestEvent{
+			TestEvent: e,
+		},
+	})
+}
+
 func (ev *eventHandler) handleDevLoopEvent(e *proto.DevLoopEvent) {
-	go ev.handle(&proto.Event{
+	ev.handle(&proto.Event{
 		EventType: &proto.Event_DevLoopEvent{
 			DevLoopEvent: e,
 		},
@@ -461,7 +559,7 @@ func (ev *eventHandler) handleDevLoopEvent(e *proto.DevLoopEvent) {
 }
 
 func (ev *eventHandler) handleFileSyncEvent(e *proto.FileSyncEvent) {
-	go ev.handle(&proto.Event{
+	ev.handle(&proto.Event{
 		EventType: &proto.Event_FileSyncEvent{
 			FileSyncEvent: e,
 		},
@@ -470,8 +568,8 @@ func (ev *eventHandler) handleFileSyncEvent(e *proto.FileSyncEvent) {
 
 func LogMetaEvent() {
 	metadata := handler.state.Metadata
-	handler.logEvent(proto.LogEntry{
-		Timestamp: ptypes.TimestampNow(),
+	handler.logEvent(&proto.LogEntry{
+		Timestamp: timestamppb.Now(),
 		Event: &proto.Event{
 			EventType: &proto.Event_MetaEvent{
 				MetaEvent: &proto.MetaEvent{
@@ -484,12 +582,24 @@ func LogMetaEvent() {
 }
 
 func (ev *eventHandler) handle(event *proto.Event) {
-	logEntry := &proto.LogEntry{
-		Timestamp: ptypes.TimestampNow(),
-		Event:     event,
+	ev.eventChan <- firedEvent{
+		event: event,
+		ts:    timestamppb.Now(),
+	}
+	if _, ok := event.GetEventType().(*proto.Event_TerminationEvent); ok {
+		// close the event channel indicating there are no more events to all the
+		// receivers
+		close(ev.eventChan)
+	}
+}
+
+func (ev *eventHandler) handleExec(f firedEvent) {
+	logEntry := proto.LogEntry{
+		Timestamp: f.ts,
+		Event:     f.event,
 	}
 
-	switch e := event.GetEventType().(type) {
+	switch e := f.event.GetEventType().(type) {
 	case *proto.Event_BuildEvent:
 		be := e.BuildEvent
 		ev.stateLock.Lock()
@@ -505,6 +615,21 @@ func (ev *eventHandler) handle(event *proto.Event) {
 			// logEntry.Err = be.Err
 		default:
 		}
+	case *proto.Event_TestEvent:
+		te := e.TestEvent
+		ev.stateLock.Lock()
+		ev.state.TestState.Status = te.Status
+		ev.stateLock.Unlock()
+		switch te.Status {
+		case InProgress:
+			logEntry.Entry = "Test started"
+		case Complete:
+			logEntry.Entry = "Test completed"
+		case Failed:
+			logEntry.Entry = "Test failed"
+			// logEntry.Err = te.Err
+		default:
+		}
 	case *proto.Event_DeployEvent:
 		de := e.DeployEvent
 		ev.stateLock.Lock()
@@ -514,7 +639,7 @@ func (ev *eventHandler) handle(event *proto.Event) {
 		case InProgress:
 			logEntry.Entry = "Deploy started"
 		case Complete:
-			logEntry.Entry = "Deploy complete"
+			logEntry.Entry = "Deploy completed"
 		case Failed:
 			logEntry.Entry = "Deploy failed"
 			// logEntry.Err = de.Err
@@ -523,6 +648,9 @@ func (ev *eventHandler) handle(event *proto.Event) {
 	case *proto.Event_PortEvent:
 		pe := e.PortEvent
 		ev.stateLock.Lock()
+		if ev.state.ForwardedPorts == nil {
+			ev.state.ForwardedPorts = map[int32]*proto.PortEvent{}
+		}
 		ev.state.ForwardedPorts[pe.LocalPort] = pe
 		ev.stateLock.Unlock()
 		logEntry.Entry = fmt.Sprintf("Forwarding container %s to local port %d", pe.ContainerName, pe.LocalPort)
@@ -546,6 +674,9 @@ func (ev *eventHandler) handle(event *proto.Event) {
 		rse := e.ResourceStatusCheckEvent
 		rseName := rse.Resource
 		ev.stateLock.Lock()
+		if ev.state.StatusCheckState.Resources == nil {
+			ev.state.StatusCheckState.Resources = map[string]string{}
+		}
 		ev.state.StatusCheckState.Resources[rseName] = rse.Status
 		ev.stateLock.Unlock()
 		switch rse.Status {
@@ -600,20 +731,17 @@ func (ev *eventHandler) handle(event *proto.Event) {
 		de := e.DevLoopEvent
 		switch de.Status {
 		case InProgress:
-			logEntry.Entry = fmt.Sprintf("DevInit Iteration %d in progress", de.Iteration)
+			logEntry.Entry = "Update initiated"
 		case Succeeded:
-			logEntry.Entry = fmt.Sprintf("DevInit Iteration %d successful", de.Iteration)
+			logEntry.Entry = "Update succeeded"
 		case Failed:
-			logEntry.Entry = fmt.Sprintf("DevInit Iteration %d failed with error code %v", de.Iteration, de.Err.ErrCode)
+			logEntry.Entry = fmt.Sprintf("Update failed with error code %v", de.Err.ErrCode)
 		}
-	default:
-		return
 	}
-
-	ev.logEvent(*logEntry)
+	ev.logEvent(&logEntry)
 }
 
-// ResetStateOnBuild resets the build, deploy and sync state
+// ResetStateOnBuild resets the build, test, deploy and sync state
 func ResetStateOnBuild() {
 	builds := map[string]string{}
 	for k := range handler.getState().BuildState.Artifacts {
@@ -621,6 +749,13 @@ func ResetStateOnBuild() {
 	}
 	autoBuild, autoDeploy, autoSync := handler.getState().BuildState.AutoTrigger, handler.getState().DeployState.AutoTrigger, handler.getState().FileSyncState.AutoTrigger
 	newState := emptyStateWithArtifacts(builds, handler.getState().Metadata, autoBuild, autoDeploy, autoSync)
+	handler.setState(newState)
+}
+
+// ResetStateOnTest resets the test, deploy, sync and status check state
+func ResetStateOnTest() {
+	newState := handler.getState()
+	newState.TestState.Status = NotStarted
 	handler.setState(newState)
 }
 
@@ -672,4 +807,50 @@ func AutoTriggerDiff(name string, val bool) (bool, error) {
 	default:
 		return false, fmt.Errorf("unknown phase %v not found in handler state", name)
 	}
+}
+
+// BuildSequenceFailed notifies that the build sequence has failed.
+func BuildSequenceFailed(err error) {
+	aiErr := sErrors.ActionableErr(handler.cfg, constants.Build, err)
+	handler.stateLock.Lock()
+	handler.state.BuildState.StatusCode = aiErr.ErrCode
+	handler.stateLock.Unlock()
+}
+
+func InititializationFailed(err error) {
+	handler.handle(&proto.Event{
+		EventType: &proto.Event_TerminationEvent{
+			TerminationEvent: &proto.TerminationEvent{
+				Status: Failed,
+				Err:    sErrors.ActionableErr(handler.cfg, constants.Init, err),
+			},
+		},
+	})
+}
+
+// SaveEventsToFile saves the current event log to the filepath provided
+func SaveEventsToFile(fp string) error {
+	handler.logLock.Lock()
+	// Ensure that the filepath provided has the directories available when attemping to save the file.
+	dir := filepath.Dir(fp)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("unable to create directory %q: %w", dir, err)
+	}
+	f, err := os.OpenFile(fp, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		return fmt.Errorf("opening %s: %w", fp, err)
+	}
+	defer f.Close()
+	marshaller := jsonpb.Marshaler{}
+	for _, ev := range handler.eventLog {
+		contents := bytes.NewBuffer([]byte{})
+		if err := marshaller.Marshal(contents, ev); err != nil {
+			return fmt.Errorf("marshalling event: %w", err)
+		}
+		if _, err := f.WriteString(contents.String() + "\n"); err != nil {
+			return fmt.Errorf("writing string: %w", err)
+		}
+	}
+	handler.logLock.Unlock()
+	return nil
 }

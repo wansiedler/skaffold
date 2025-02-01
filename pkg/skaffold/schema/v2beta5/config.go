@@ -19,7 +19,7 @@ package v2beta5
 import (
 	v1 "k8s.io/api/core/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
 )
 
 // !!! WARNING !!! This config version is already released, please DO NOT MODIFY the structs in this file.
@@ -197,8 +197,8 @@ type LocalBuild struct {
 	// UseDockerCLI use `docker` command-line interface instead of Docker Engine APIs.
 	UseDockerCLI bool `yaml:"useDockerCLI,omitempty"`
 
-	// UseBuildkit use BuildKit to build Docker images.
-	UseBuildkit bool `yaml:"useBuildkit,omitempty"`
+	// UseBuildkit use BuildKit to build Docker images. If unspecified, uses the Docker default.
+	UseBuildkit *bool `yaml:"useBuildkit,omitempty"`
 
 	// Concurrency is how many artifacts can be built concurrently. 0 means "no-limit".
 	// Defaults to `1`.
@@ -328,7 +328,7 @@ type ClusterDetails struct {
 	Annotations map[string]string `yaml:"annotations,omitempty"`
 
 	// RunAsUser defines the UID to request for running the container.
-	// If omitted, no SeurityContext will be specified for the pod and will therefore be inherited
+	// If omitted, no SecurityContext will be specified for the pod and will therefore be inherited
 	// from the service account.
 	RunAsUser *int64 `yaml:"runAsUser,omitempty"`
 

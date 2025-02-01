@@ -19,14 +19,16 @@ package cluster
 import (
 	"testing"
 
+	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/kaniko"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestKanikoArgs(t *testing.T) {
@@ -46,12 +48,26 @@ func TestKanikoArgs(t *testing.T) {
 			expectedArgs: []string{},
 		},
 		{
+			description: "with Destination",
+			artifact: &latest.KanikoArtifact{
+				DockerfilePath: "Dockerfile",
+				Destination: []string{
+					"gcr.io/foo/bar:test-1",
+					"gcr.io/foo/bar:test-2",
+				},
+			},
+			expectedArgs: []string{
+				kaniko.DestinationFlag, "gcr.io/foo/bar:test-1",
+				kaniko.DestinationFlag, "gcr.io/foo/bar:test-2",
+			},
+		},
+		{
 			description: "cache layers",
 			artifact: &latest.KanikoArtifact{
 				DockerfilePath: "Dockerfile",
 				Cache:          &latest.KanikoCache{},
 			},
-			expectedArgs: []string{"--cache=true"},
+			expectedArgs: []string{kaniko.CacheFlag},
 		},
 		{
 			description: "cache layers to specific repo",
@@ -61,17 +77,19 @@ func TestKanikoArgs(t *testing.T) {
 					Repo: "repo",
 				},
 			},
-			expectedArgs: []string{"--cache=true", "--cache-repo", "repo"},
+			expectedArgs: []string{"--cache", kaniko.CacheRepoFlag, "repo"},
 		},
 		{
 			description: "cache path",
 			artifact: &latest.KanikoArtifact{
 				DockerfilePath: "Dockerfile",
 				Cache: &latest.KanikoCache{
-					HostPath: "/host/cache",
+					HostPath: "/cache",
 				},
 			},
-			expectedArgs: []string{"--cache=true", "--cache-dir", "/cache"},
+			expectedArgs: []string{
+				kaniko.CacheFlag,
+				kaniko.CacheDirFlag, "/cache"},
 		},
 		{
 			description: "target",
@@ -79,7 +97,7 @@ func TestKanikoArgs(t *testing.T) {
 				DockerfilePath: "Dockerfile",
 				Target:         "target",
 			},
-			expectedArgs: []string{"--target", "target"},
+			expectedArgs: []string{kaniko.TargetFlag, "target"},
 		},
 		{
 			description: "reproducible",
@@ -87,7 +105,7 @@ func TestKanikoArgs(t *testing.T) {
 				DockerfilePath: "Dockerfile",
 				Reproducible:   true,
 			},
-			expectedArgs: []string{"--reproducible"},
+			expectedArgs: []string{kaniko.ReproducibleFlag},
 		},
 		{
 			description: "build args",
@@ -95,18 +113,21 @@ func TestKanikoArgs(t *testing.T) {
 				DockerfilePath: "Dockerfile",
 				BuildArgs: map[string]*string{
 					"nil_key":   nil,
-					"empty_key": util.StringPtr(""),
-					"value_key": util.StringPtr("value"),
+					"empty_key": util.Ptr(""),
+					"value_key": util.Ptr("value"),
 				},
 			},
-			expectedArgs: []string{"--build-arg", "empty_key=", "--build-arg", "nil_key", "--build-arg", "value_key=value"},
+			expectedArgs: []string{
+				kaniko.BuildArgsFlag, "empty_key=",
+				kaniko.BuildArgsFlag, "nil_key",
+				kaniko.BuildArgsFlag, "value_key=value"},
 		},
 		{
 			description: "invalid build args",
 			artifact: &latest.KanikoArtifact{
 				DockerfilePath: "Dockerfile",
 				BuildArgs: map[string]*string{
-					"invalid": util.StringPtr("{{Invalid"),
+					"invalid": util.Ptr("{{Invalid"),
 				},
 			},
 			shouldErr: true,
@@ -117,7 +138,7 @@ func TestKanikoArgs(t *testing.T) {
 				DockerfilePath: "Dockerfile",
 			},
 			insecureRegistries: map[string]bool{"localhost:4000": true},
-			expectedArgs:       []string{"--insecure-registry", "localhost:4000"},
+			expectedArgs:       []string{kaniko.InsecureRegistryFlag, "localhost:4000"},
 		},
 		{
 			description: "skip tls",
@@ -125,7 +146,10 @@ func TestKanikoArgs(t *testing.T) {
 				DockerfilePath: "Dockerfile",
 				SkipTLS:        true,
 			},
-			expectedArgs: []string{"--skip-tls-verify-registry", "gcr.io"},
+			expectedArgs: []string{
+				kaniko.SkipTLSFlag,
+				kaniko.SkipTLSVerifyRegistryFlag, "gcr.io",
+			},
 		},
 		{
 			description: "invalid registry",
@@ -139,7 +163,7 @@ func TestKanikoArgs(t *testing.T) {
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			commonArgs := []string{"--dockerfile", "Dockerfile", "--context", "dir:///kaniko/buildcontext", "--destination", "gcr.io/tag", "-v", "info"}
+			commonArgs := []string{"--destination", "gcr.io/tag", "--dockerfile", "Dockerfile", "--context", "dir:///kaniko/buildcontext"}
 
 			tag := "gcr.io/tag"
 			if test.tag != "" {
@@ -157,9 +181,14 @@ func TestKanikoArgs(t *testing.T) {
 
 func TestKanikoPodSpec(t *testing.T) {
 	artifact := &latest.KanikoArtifact{
-		Image:          "image",
-		DockerfilePath: "Dockerfile",
-		InitImage:      "init/image",
+		Image:           "image",
+		DockerfilePath:  "Dockerfile",
+		InitImage:       "init/image",
+		ImagePullSecret: "image-pull-secret",
+		Destination: []string{
+			"gcr.io/foo/bar:test-1",
+			"gcr.io/foo/bar:test-2",
+		},
 		Env: []v1.EnvVar{{
 			Name:  "KEY",
 			Value: "VALUE",
@@ -181,7 +210,9 @@ func TestKanikoPodSpec(t *testing.T) {
 	}
 
 	var runAsUser int64 = 0
+
 	builder := &Builder{
+		cfg: &mockBuilderContext{},
 		ClusterDetails: &latest.ClusterDetails{
 			Namespace:           "ns",
 			PullSecretName:      "secret",
@@ -190,6 +221,8 @@ func TestKanikoPodSpec(t *testing.T) {
 			HTTPProxy:           "http://proxy",
 			HTTPSProxy:          "https://proxy",
 			ServiceAccountName:  "aVerySpecialSA",
+			Annotations:         map[string]string{"test": "test"},
+			Labels:              map[string]string{"test-key": "test-value"},
 			RunAsUser:           &runAsUser,
 			Resources: &latest.ResourceRequirements{
 				Requests: &latest.ResourceRequirement{
@@ -228,15 +261,17 @@ func TestKanikoPodSpec(t *testing.T) {
 					TolerationSeconds: nil,
 				},
 			},
+			NodeSelector: map[string]string{"kubernetes.io/os": "linux"},
 		},
 	}
-	pod, _ := builder.kanikoPodSpec(artifact, "tag")
+	matcher := platform.Matcher{Platforms: []specs.Platform{{OS: "linux", Architecture: "arm64"}}}
+	pod, _ := builder.kanikoPodSpec(artifact, "tag", matcher)
 
 	expectedPod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations:  map[string]string{"test": "test"},
 			GenerateName: "kaniko-",
-			Labels:       map[string]string{"skaffold-kaniko": "skaffold-kaniko"},
+			Labels:       map[string]string{"skaffold-kaniko": "skaffold-kaniko", "test-key": "test-value"},
 			Namespace:    "ns",
 		},
 		Spec: v1.PodSpec{
@@ -245,8 +280,8 @@ func TestKanikoPodSpec(t *testing.T) {
 				Image:   "init/image",
 				Command: []string{"sh", "-c", "while [ ! -f /tmp/complete ]; do sleep 1; done"},
 				VolumeMounts: []v1.VolumeMount{{
-					Name:      constants.DefaultKanikoEmptyDirName,
-					MountPath: constants.DefaultKanikoEmptyDirMountPath,
+					Name:      kaniko.DefaultEmptyDirName,
+					MountPath: kaniko.DefaultEmptyDirMountPath,
 				}, {
 					Name:      "cm-volume-1",
 					ReadOnly:  true,
@@ -268,14 +303,11 @@ func TestKanikoPodSpec(t *testing.T) {
 				},
 			}},
 			Containers: []v1.Container{{
-				Name:            constants.DefaultKanikoContainerName,
+				Name:            kaniko.DefaultContainerName,
 				Image:           "image",
-				Args:            []string{"--dockerfile", "Dockerfile", "--context", "dir:///kaniko/buildcontext", "--destination", "tag", "-v", "info"},
+				Args:            []string{"--destination", "tag", "--dockerfile", "Dockerfile", "--context", "dir:///kaniko/buildcontext", "--destination", "gcr.io/foo/bar:test-1", "--destination", "gcr.io/foo/bar:test-2"},
 				ImagePullPolicy: v1.PullIfNotPresent,
 				Env: []v1.EnvVar{{
-					Name:  "GOOGLE_APPLICATION_CREDENTIALS",
-					Value: "/secret/kaniko-secret.json",
-				}, {
 					Name:  "UPSTREAM_CLIENT_TYPE",
 					Value: "UpstreamClient(skaffold-)",
 				}, {
@@ -287,14 +319,17 @@ func TestKanikoPodSpec(t *testing.T) {
 				}, {
 					Name:  "HTTPS_PROXY",
 					Value: "https://proxy",
+				}, {
+					Name:  "GOOGLE_APPLICATION_CREDENTIALS",
+					Value: "/secret/kaniko-secret.json",
 				}},
 				VolumeMounts: []v1.VolumeMount{
 					{
-						Name:      constants.DefaultKanikoEmptyDirName,
-						MountPath: constants.DefaultKanikoEmptyDirMountPath,
+						Name:      kaniko.DefaultEmptyDirName,
+						MountPath: kaniko.DefaultEmptyDirMountPath,
 					},
 					{
-						Name:      constants.DefaultKanikoSecretName,
+						Name:      kaniko.DefaultSecretName,
 						MountPath: "/secret",
 					},
 					{
@@ -319,6 +354,9 @@ func TestKanikoPodSpec(t *testing.T) {
 					},
 				},
 			}},
+			ImagePullSecrets: []v1.LocalObjectReference{{
+				Name: "image-pull-secret",
+			}},
 			ServiceAccountName: "aVerySpecialSA",
 			SecurityContext: &v1.PodSecurityContext{
 				RunAsUser: &runAsUser,
@@ -326,13 +364,13 @@ func TestKanikoPodSpec(t *testing.T) {
 			RestartPolicy: v1.RestartPolicyNever,
 			Volumes: []v1.Volume{
 				{
-					Name: constants.DefaultKanikoEmptyDirName,
+					Name: kaniko.DefaultEmptyDirName,
 					VolumeSource: v1.VolumeSource{
 						EmptyDir: &v1.EmptyDirVolumeSource{},
 					},
 				},
 				{
-					Name: constants.DefaultKanikoSecretName,
+					Name: kaniko.DefaultSecretName,
 					VolumeSource: v1.VolumeSource{
 						Secret: &v1.SecretVolumeSource{
 							SecretName: "secret",
@@ -367,10 +405,13 @@ func TestKanikoPodSpec(t *testing.T) {
 					TolerationSeconds: nil,
 				},
 			},
+			NodeSelector: map[string]string{"kubernetes.io/os": "linux", "kubernetes.io/arch": "arm64"},
 		},
 	}
 
 	testutil.CheckDeepEqual(t, expectedPod.Spec.Containers[0].Env, pod.Spec.Containers[0].Env)
+	testutil.CheckDeepEqual(t, expectedPod.Spec.Containers[0].Args, pod.Spec.Containers[0].Args)
+	testutil.CheckDeepEqual(t, expectedPod.ObjectMeta, pod.ObjectMeta)
 }
 
 func TestResourceRequirements(t *testing.T) {

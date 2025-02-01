@@ -20,13 +20,14 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"io"
-	"io/ioutil"
 	"runtime"
 	"testing"
 	"time"
 
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/constants"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestCreateTar(t *testing.T) {
@@ -39,7 +40,7 @@ func TestCreateTar(t *testing.T) {
 		_, paths := prepareFiles(t, files)
 
 		var b bytes.Buffer
-		err := CreateTar(&b, ".", paths)
+		err := CreateTar(context.Background(), &b, ".", paths)
 		t.CheckNoError(err)
 
 		// Make sure the contents match.
@@ -52,7 +53,7 @@ func TestCreateTar(t *testing.T) {
 			}
 			t.CheckNoError(err)
 
-			content, err := ioutil.ReadAll(tr)
+			content, err := io.ReadAll(tr)
 			t.CheckNoError(err)
 
 			tarFiles[hdr.Name] = string(content)
@@ -72,7 +73,7 @@ func TestCreateTarWithParents(t *testing.T) {
 		_, paths := prepareFiles(t, files)
 
 		var b bytes.Buffer
-		err := CreateTarWithParents(&b, ".", paths, 10, 100, time.Now())
+		err := CreateTarWithParents(context.Background(), &b, ".", paths, 10, 100, time.Now())
 		t.CheckNoError(err)
 
 		// Make sure the contents match.
@@ -87,7 +88,7 @@ func TestCreateTarWithParents(t *testing.T) {
 			t.CheckDeepEqual(10, hdr.Uid)
 			t.CheckDeepEqual(100, hdr.Gid)
 
-			content, err := ioutil.ReadAll(tr)
+			content, err := io.ReadAll(tr)
 			t.CheckNoError(err)
 
 			tarFiles[hdr.Name] = string(content)
@@ -112,7 +113,7 @@ func TestCreateTarGz(t *testing.T) {
 		_, paths := prepareFiles(t, files)
 
 		var b bytes.Buffer
-		err := CreateTarGz(&b, ".", paths)
+		err := CreateTarGz(context.Background(), &b, ".", paths)
 		t.CheckNoError(err)
 
 		// Make sure the contents match.
@@ -127,7 +128,7 @@ func TestCreateTarGz(t *testing.T) {
 			}
 			t.CheckNoError(err)
 
-			content, err := ioutil.ReadAll(tr)
+			content, err := io.ReadAll(tr)
 			t.CheckNoError(err)
 
 			tarFiles[hdr.Name] = string(content)
@@ -147,7 +148,7 @@ func TestCreateTarSubDirectory(t *testing.T) {
 		_, paths := prepareFiles(t, files)
 
 		var b bytes.Buffer
-		err := CreateTar(&b, "sub", paths)
+		err := CreateTar(context.Background(), &b, "sub", paths)
 		t.CheckNoError(err)
 
 		// Make sure the contents match.
@@ -160,7 +161,7 @@ func TestCreateTarSubDirectory(t *testing.T) {
 			}
 			t.CheckNoError(err)
 
-			content, err := ioutil.ReadAll(tr)
+			content, err := io.ReadAll(tr)
 			t.CheckNoError(err)
 
 			tarFiles["sub/"+hdr.Name] = string(content)
@@ -177,7 +178,7 @@ func TestCreateTarEmptyFolder(t *testing.T) {
 			Chdir()
 
 		var b bytes.Buffer
-		err := CreateTar(&b, ".", []string{"empty"})
+		err := CreateTar(context.Background(), &b, ".", []string{"empty"})
 		t.CheckNoError(err)
 
 		// Make sure the contents match.
@@ -210,7 +211,7 @@ func TestCreateTarWithAbsolutePaths(t *testing.T) {
 		tmpDir, paths := prepareFiles(t, files)
 
 		var b bytes.Buffer
-		err := CreateTar(&b, tmpDir.Root(), tmpDir.Paths(paths...))
+		err := CreateTar(context.Background(), &b, tmpDir.Root(), tmpDir.Paths(paths...))
 		t.CheckNoError(err)
 
 		// Make sure the contents match.
@@ -223,7 +224,7 @@ func TestCreateTarWithAbsolutePaths(t *testing.T) {
 			}
 			t.CheckNoError(err)
 
-			content, err := ioutil.ReadAll(tr)
+			content, err := io.ReadAll(tr)
 			t.CheckNoError(err)
 
 			tarFiles[hdr.Name] = string(content)
@@ -234,7 +235,7 @@ func TestCreateTarWithAbsolutePaths(t *testing.T) {
 }
 
 func TestAddFileToTarSymlinks(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == constants.Windows {
 		t.Skip("creating symlinks requires extra privileges on Windows")
 	}
 
@@ -257,7 +258,7 @@ func TestAddFileToTarSymlinks(t *testing.T) {
 		}
 
 		var b bytes.Buffer
-		err := CreateTar(&b, tmpDir.Root(), tmpDir.Paths(paths...))
+		err := CreateTar(context.Background(), &b, tmpDir.Root(), tmpDir.Paths(paths...))
 		t.CheckNoError(err)
 
 		// Make sure the links match.
@@ -281,6 +282,24 @@ func TestAddFileToTarSymlinks(t *testing.T) {
 				t.Errorf("Link destination doesn't match. %s != %s.", link, hdr.Linkname)
 			}
 		}
+	})
+}
+
+func TestAddFileToTarTimeout(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		files := map[string]string{
+			"foo":     "baz1",
+			"bar/bat": "baz2",
+			"bar/baz": "baz3",
+		}
+		tmpDir, paths := prepareFiles(t, files)
+
+		var b bytes.Buffer
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Nanosecond)
+		time.Sleep(1 * time.Second)
+		defer cancel()
+		err := CreateTar(ctx, &b, tmpDir.Root(), tmpDir.Paths(paths...))
+		t.CheckErrorContains("context deadline exceeded", err)
 	})
 }
 

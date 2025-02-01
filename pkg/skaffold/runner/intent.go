@@ -16,12 +16,15 @@ limitations under the License.
 
 package runner
 
-import "sync"
+import (
+	"sync"
+)
 
-type intents struct {
+type Intents struct {
 	build      bool
 	sync       bool
 	deploy     bool
+	devloop    bool
 	autoBuild  bool
 	autoSync   bool
 	autoDeploy bool
@@ -29,8 +32,8 @@ type intents struct {
 	lock sync.Mutex
 }
 
-func newIntents(autoBuild, autoSync, autoDeploy bool) *intents {
-	i := &intents{
+func NewIntents(autoBuild, autoSync, autoDeploy bool) *Intents {
+	i := &Intents{
 		autoBuild:  autoBuild,
 		autoSync:   autoSync,
 		autoDeploy: autoDeploy,
@@ -39,81 +42,126 @@ func newIntents(autoBuild, autoSync, autoDeploy bool) *intents {
 	return i
 }
 
-func (i *intents) resetBuild() {
+// GetIntentsAttrs returns the intent attributes for testing only.
+func (i *Intents) GetIntentsAttrs() (bool, bool, bool) {
+	return i.build, i.sync, i.deploy
+}
+
+func (i *Intents) Reset() {
+	i.lock.Lock()
+	i.build = i.autoBuild
+	i.sync = i.autoSync
+	i.deploy = i.autoDeploy
+	i.lock.Unlock()
+}
+
+func (i *Intents) ResetBuild() {
 	i.lock.Lock()
 	i.build = i.autoBuild
 	i.lock.Unlock()
 }
 
-func (i *intents) resetSync() {
+func (i *Intents) ResetSync() {
 	i.lock.Lock()
 	i.sync = i.autoSync
 	i.lock.Unlock()
 }
 
-func (i *intents) resetDeploy() {
+func (i *Intents) ResetDeploy() {
 	i.lock.Lock()
 	i.deploy = i.autoDeploy
 	i.lock.Unlock()
 }
 
-func (i *intents) setBuild(val bool) {
+func (i *Intents) SetBuild(val bool) {
 	i.lock.Lock()
 	i.build = val
 	i.lock.Unlock()
 }
 
-func (i *intents) setSync(val bool) {
+func (i *Intents) SetSync(val bool) {
 	i.lock.Lock()
 	i.sync = val
 	i.lock.Unlock()
 }
 
-func (i *intents) setDeploy(val bool) {
+func (i *Intents) SetDeploy(val bool) {
 	i.lock.Lock()
 	i.deploy = val
 	i.lock.Unlock()
 }
 
-func (i *intents) getAutoBuild() bool {
+func (i *Intents) SetDevloop(val bool) {
+	i.lock.Lock()
+	i.devloop = val
+	i.lock.Unlock()
+}
+
+func (i *Intents) GetAutoBuild() bool {
 	i.lock.Lock()
 	defer i.lock.Unlock()
 	return i.autoBuild
 }
 
-func (i *intents) getAutoSync() bool {
+func (i *Intents) GetAutoSync() bool {
 	i.lock.Lock()
 	defer i.lock.Unlock()
 	return i.autoSync
 }
 
-func (i *intents) getAutoDeploy() bool {
+func (i *Intents) GetAutoDeploy() bool {
 	i.lock.Lock()
 	defer i.lock.Unlock()
 	return i.autoDeploy
 }
 
-func (i *intents) setAutoBuild(val bool) {
+func (i *Intents) GetAutoDevloop() bool {
+	i.lock.Lock()
+	defer i.lock.Unlock()
+	return i.autoDeploy && i.autoBuild && i.autoSync
+}
+
+func (i *Intents) SetAutoBuild(val bool) {
 	i.lock.Lock()
 	i.autoBuild = val
 	i.lock.Unlock()
 }
 
-func (i *intents) setAutoSync(val bool) {
+func (i *Intents) SetAutoSync(val bool) {
 	i.lock.Lock()
 	i.autoSync = val
 	i.lock.Unlock()
 }
 
-func (i *intents) setAutoDeploy(val bool) {
+func (i *Intents) SetAutoDeploy(val bool) {
 	i.lock.Lock()
 	i.autoDeploy = val
 	i.lock.Unlock()
 }
 
-// returns build, sync, and deploy intents (in that order)
-func (i *intents) GetIntents() (bool, bool, bool) {
+func (i *Intents) SetAutoDevloop(val bool) {
+	i.lock.Lock()
+	i.autoDeploy = val
+	i.autoSync = val
+	i.autoBuild = val
+	i.lock.Unlock()
+}
+
+// GetIntents returns build, sync, and deploy intents (in that order)
+// If intent is devloop intent, all are returned true
+func (i *Intents) GetIntents() (bool, bool, bool) {
 	i.lock.Lock()
 	defer i.lock.Unlock()
+	if i.devloop {
+		// reset Devloop intent
+		i.devloop = false
+		return true, true, true
+	}
 	return i.build, i.sync, i.deploy
+}
+
+func (i *Intents) IsAnyAutoEnabled() bool {
+	i.lock.Lock()
+	defer i.lock.Unlock()
+	return i.autoBuild || i.autoSync || i.autoDeploy
 }

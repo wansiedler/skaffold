@@ -18,71 +18,52 @@ package gcb
 
 import (
 	"fmt"
-	"sort"
 
 	"google.golang.org/api/cloudbuild/v1"
+	v1 "k8s.io/api/core/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/kaniko"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/misc"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
 )
 
-func (b *Builder) kanikoBuildSpec(artifact *latest.KanikoArtifact, tag string) (cloudbuild.Build, error) {
-	buildArgs, err := b.kanikoBuildArgs(artifact)
+func (b *Builder) kanikoBuildSpec(a *latest.Artifact, tag string) (cloudbuild.Build, error) {
+	k := a.KanikoArtifact
+	requiredImages := docker.ResolveDependencyImages(a.Dependencies, b.artifactStore, true)
+	// add required artifacts as build args
+	envTags, err := docker.EnvTags(tag)
+	if err != nil {
+		return cloudbuild.Build{}, fmt.Errorf("unable to create build args: %w", err)
+	}
+	buildArgs, err := docker.EvalBuildArgsWithEnv(b.cfg.Mode(), kaniko.GetContext(a.KanikoArtifact, a.Workspace), k.DockerfilePath, k.BuildArgs, requiredImages, envTags)
+	if err != nil {
+		return cloudbuild.Build{}, fmt.Errorf("unable to evaluate build args: %w", err)
+	}
+	k.BuildArgs = buildArgs
+	kanikoArgs, err := kaniko.Args(k, tag, "")
 	if err != nil {
 		return cloudbuild.Build{}, err
 	}
 
-	kanikoArgs := []string{
-		"--destination", tag,
-		"--dockerfile", artifact.DockerfilePath,
-	}
-	kanikoArgs = append(kanikoArgs, buildArgs...)
-
-	if artifact.Cache != nil {
-		kanikoArgs = append(kanikoArgs, "--cache")
-
-		if artifact.Cache.Repo != "" {
-			kanikoArgs = append(kanikoArgs, "--cache-repo", artifact.Cache.Repo)
-		}
-	}
-
-	if artifact.Reproducible {
-		kanikoArgs = append(kanikoArgs, "--reproducible")
-	}
-
-	if artifact.Target != "" {
-		kanikoArgs = append(kanikoArgs, "--target", artifact.Target)
+	env, err := misc.EvaluateEnv(envFromVars(k.Env))
+	if err != nil {
+		return cloudbuild.Build{}, fmt.Errorf("unable to evaluate env variables: %w", err)
 	}
 
 	return cloudbuild.Build{
 		Steps: []*cloudbuild.BuildStep{{
 			Name: b.KanikoImage,
 			Args: kanikoArgs,
+			Env:  env,
 		}},
 	}, nil
 }
 
-func (b *Builder) kanikoBuildArgs(artifact *latest.KanikoArtifact) ([]string, error) {
-	buildArgs, err := docker.EvaluateBuildArgs(artifact.BuildArgs)
-	if err != nil {
-		return nil, fmt.Errorf("unable to evaluate build args: %w", err)
+func envFromVars(env []v1.EnvVar) []string {
+	s := make([]string, 0, len(env))
+	for _, envVar := range env {
+		s = append(s, envVar.Name+"="+envVar.Value)
 	}
-
-	var keys []string
-	for k := range buildArgs {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var buildArgFlags []string
-	for _, k := range keys {
-		v := buildArgs[k]
-		if v == nil {
-			buildArgFlags = append(buildArgFlags, "--build-arg", k)
-		} else {
-			buildArgFlags = append(buildArgFlags, "--build-arg", fmt.Sprintf("%s=%s", k, *v))
-		}
-	}
-
-	return buildArgFlags, nil
+	return s
 }

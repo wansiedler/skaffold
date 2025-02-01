@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/yaml"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/yaml"
 )
 
 const (
@@ -31,6 +31,7 @@ const (
 	Jib       = "jib"
 	Custom    = "custom"
 	Buildpack = "buildpack"
+	Ko        = "ko"
 )
 
 // ArtifactType returns a string representing the type found in an artifact. Used for error messages.
@@ -49,6 +50,8 @@ func ArtifactType(a *latest.Artifact) string {
 		return Custom
 	case a.BuildpackArtifact != nil:
 		return Buildpack
+	case a.KoArtifact != nil:
+		return Ko
 	default:
 		return ""
 	}

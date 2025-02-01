@@ -22,10 +22,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/yaml"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/yaml"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestList(t *testing.T) {
@@ -47,23 +47,26 @@ func TestList(t *testing.T) {
 					{
 						Kubecontext:        "another_context",
 						DefaultRepo:        "other-value",
-						LocalCluster:       util.BoolPtr(false),
+						MultiLevelRepo:     util.Ptr(false),
+						LocalCluster:       util.Ptr(false),
 						InsecureRegistries: []string{"good.io", "better.io"},
 					},
 					{
 						Kubecontext:        "this_is_a_context",
 						DefaultRepo:        "value",
-						LocalCluster:       util.BoolPtr(true),
+						MultiLevelRepo:     util.Ptr(true),
+						LocalCluster:       util.Ptr(true),
 						InsecureRegistries: []string{"bad.io", "worse.io"},
 					},
 				},
 			},
 			expectedOutput: `kube-context: this_is_a_context
 default-repo: value
+multi-level-repo: true
 local-cluster: true
 insecure-registries:
-- bad.io
-- worse.io
+  - bad.io
+  - worse.io
 `,
 		},
 		{
@@ -72,7 +75,8 @@ insecure-registries:
 			cfg: &config.GlobalConfig{
 				Global: &config.ContextConfig{
 					DefaultRepo:        "default-repo-value",
-					LocalCluster:       util.BoolPtr(true),
+					MultiLevelRepo:     util.Ptr(true),
+					LocalCluster:       util.Ptr(true),
 					InsecureRegistries: []string{"mediocre.io"},
 				},
 				ContextConfigs: []*config.ContextConfig{
@@ -83,9 +87,10 @@ insecure-registries:
 				},
 			},
 			expectedOutput: `default-repo: default-repo-value
+multi-level-repo: true
 local-cluster: true
 insecure-registries:
-- mediocre.io
+  - mediocre.io
 `,
 		},
 		{
@@ -94,7 +99,8 @@ insecure-registries:
 			cfg: &config.GlobalConfig{
 				Global: &config.ContextConfig{
 					DefaultRepo:        "default-repo-value",
-					LocalCluster:       util.BoolPtr(true),
+					MultiLevelRepo:     util.Ptr(true),
+					LocalCluster:       util.Ptr(true),
 					InsecureRegistries: []string{"mediocre.io"},
 				},
 				ContextConfigs: []*config.ContextConfig{
@@ -107,12 +113,13 @@ insecure-registries:
 			expectedOutput: `
 global:
   default-repo: default-repo-value
+  multi-level-repo: true
   local-cluster: true
   insecure-registries:
-  - mediocre.io
+    - mediocre.io
 kubeContexts:
-- kube-context: this_is_a_context
-  default-repo: value
+  - kube-context: this_is_a_context
+    default-repo: value
 `,
 		},
 		{
@@ -121,7 +128,8 @@ kubeContexts:
 			cfg: &config.GlobalConfig{
 				Global: &config.ContextConfig{
 					DefaultRepo:        "default-repo-value",
-					LocalCluster:       util.BoolPtr(true),
+					MultiLevelRepo:     util.Ptr(true),
+					LocalCluster:       util.Ptr(true),
 					InsecureRegistries: []string{"mediocre.io"},
 				},
 			},

@@ -1,9 +1,14 @@
-apiVersion: skaffold/v2beta6
+apiVersion: skaffold/v4beta12
 kind: Config
 metadata:
   name: getting-started-kustomize
 build:
   artifacts:
   - image: hello-world
-deploy:
-  kustomize: {}
+    docker:
+      dockerfile: Dockerfile
+manifests:
+  kustomize:
+    paths:
+      - "."
+

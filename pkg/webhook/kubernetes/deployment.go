@@ -31,9 +31,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	pkgkubernetes "github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes"
-	"github.com/GoogleContainerTools/skaffold/pkg/webhook/constants"
-	"github.com/GoogleContainerTools/skaffold/pkg/webhook/labels"
+	pkgkubernetes "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes"
+	kubernetesclient "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/client"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/webhook/constants"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/webhook/labels"
 )
 
 const (
@@ -44,11 +45,12 @@ const (
 
 // CreateDeployment creates a deployment for this pull request
 // The deployment has two containers:
-// 		1. An init container to git clone the PR branch
-// 		2. A container to run hugo server
+//  1. An init container to git clone the PR branch
+//  2. A container to run hugo server
+//
 // and one emptyDir volume to hold the git repository
 func CreateDeployment(pr *github.PullRequestEvent, svc *v1.Service, externalIP string) (*appsv1.Deployment, error) {
-	client, err := pkgkubernetes.Client()
+	client, err := kubernetesclient.DefaultClient()
 	if err != nil {
 		return nil, fmt.Errorf("getting Kubernetes client: %w", err)
 	}
@@ -92,7 +94,7 @@ func CreateDeployment(pr *github.PullRequestEvent, svc *v1.Service, externalIP s
 						{
 							Name:       "server",
 							Image:      constants.DeploymentImage,
-							Args:       []string{"deploy/docs/preview.sh", BaseURL(externalIP)},
+							Args:       []string{fmt.Sprintf("deploy/docs%s/preview.sh", constants.DocsVersion), BaseURL(externalIP)},
 							WorkingDir: repoPath,
 							VolumeMounts: []v1.VolumeMount{
 								{
@@ -119,12 +121,12 @@ func CreateDeployment(pr *github.PullRequestEvent, svc *v1.Service, externalIP s
 			},
 		},
 	}
-	return client.AppsV1().Deployments(constants.Namespace).Create(d)
+	return client.AppsV1().Deployments(constants.Namespace).Create(context.Background(), d, metav1.CreateOptions{})
 }
 
 // WaitForDeploymentToStabilize waits till the Deployment has stabilized
 func WaitForDeploymentToStabilize(d *appsv1.Deployment, ip string) error {
-	client, err := pkgkubernetes.Client()
+	client, err := kubernetesclient.DefaultClient()
 	if err != nil {
 		return fmt.Errorf("getting Kubernetes client: %w", err)
 	}

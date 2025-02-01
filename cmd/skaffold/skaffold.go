@@ -21,32 +21,35 @@ import (
 	"errors"
 	"os"
 
-	"github.com/sirupsen/logrus"
+	"cloud.google.com/go/profiler"
 
-	"github.com/GoogleContainerTools/skaffold/cmd/skaffold/app"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
+	"github.com/GoogleContainerTools/skaffold/v2/cmd/skaffold/app"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/instrumentation"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/version"
 )
 
-type ExitCoder interface {
-	ExitCode() int
-}
-
 func main() {
-	if err := app.Run(os.Stdout, os.Stderr); err != nil {
-		if errors.Is(err, context.Canceled) {
-			logrus.Debugln("ignore error since context is cancelled:", err)
-		} else {
-			color.Red.Fprintln(os.Stderr, err)
-			os.Exit(exitCode(err))
+	if _, ok := os.LookupEnv("SKAFFOLD_PROFILER"); ok {
+		err := profiler.Start(profiler.Config{
+			Service:              os.Getenv("SKAFFOLD_PROFILER_SERVICE"),
+			NoHeapProfiling:      true,
+			NoAllocProfiling:     true,
+			NoGoroutineProfiling: true,
+			DebugLogging:         true,
+			// ProjectID must be set if not running on GCP.
+			ProjectID:      os.Getenv("SKAFFOLD_PROFILER_PROJECT"),
+			ServiceVersion: version.Get().Version,
+		})
+		if err != nil {
+			log.Entry(context.TODO()).Fatalf("failed to start the profiler: %v", err)
 		}
 	}
-}
-
-func exitCode(err error) int {
-	var exitCoder ExitCoder
-	if errors.As(err, &exitCoder) {
-		return exitCoder.ExitCode()
+	var code int
+	if err := app.Run(os.Stdout, os.Stderr); err != nil && !errors.Is(err, context.Canceled) {
+		// ignore cancelled errors
+		code = app.ExitCode(err)
 	}
-
-	return 1
+	instrumentation.ShutdownAndFlush(context.Background(), code)
+	os.Exit(code)
 }

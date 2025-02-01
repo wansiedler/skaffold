@@ -1,14 +1,14 @@
-apiVersion: skaffold/v2beta6
+apiVersion: skaffold/v4beta12
 kind: Config
 build:
   artifacts:
-    - image: gcr.io/k8s-skaffold/skaffold-example
+    - image: us-central1-docker.pkg.dev/k8s-skaffold/testing/skaffold-example
       context: ./kubectl
-deploy:
+manifests:
+  rawYaml:
+    - kubectl/k8s-pod.yaml
   kustomize:
     paths:
-    - ./kustomize
-
-  kubectl:
-    manifests:
-      - kubectl/k8s-pod.yaml
+      - ./kustomize
+deploy:
+  kubectl: {}

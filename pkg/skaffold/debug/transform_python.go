@@ -17,102 +17,184 @@ limitations under the License.
 package debug
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 
-	"github.com/sirupsen/logrus"
-	v1 "k8s.io/api/core/v1"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/debug/types"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util/stringslice"
 )
 
 type pythonTransformer struct{}
 
+//nolint:golint
+func NewPythonTransformer() containerTransformer {
+	return pythonTransformer{}
+}
+
 func init() {
-	containerTransforms = append(containerTransforms, pythonTransformer{})
+	RegisterContainerTransformer(NewPythonTransformer())
 }
 
 const (
 	// most examples use 5678
-	defaultPtvsdPort = 5678
+	defaultPtvsdPort   = 5678
+	defaultDebugpyPort = 5678
+	defaultPydevdPort  = 5678
 )
 
-// ptvsdSpec captures the useful python-ptvsd devtools options
-type ptvsdSpec struct {
-	host string
-	port int32
-	wait bool
+type pythonDebugType int
+
+const (
+	ptvsd pythonDebugType = iota
+	debugpy
+	pydevd
+)
+
+const (
+	pydevdProtocol = "pydevd"
+	dapProtocol    = "dap"
+)
+
+// pythonSpec captures the useful python-ptvsd devtools options
+type pythonSpec struct {
+	debugger pythonDebugType
+	host     string
+	port     int32
+	wait     bool
 }
 
 // isLaunchingPython determines if the arguments seems to be invoking python
 func isLaunchingPython(args []string) bool {
-	return len(args) > 0 &&
-		(args[0] == "python" || strings.HasSuffix(args[0], "/python") ||
-			args[0] == "python2" || strings.HasSuffix(args[0], "/python2") ||
-			args[0] == "python3" || strings.HasSuffix(args[0], "/python3"))
+	return len(args) > 0 && (args[0] == "python" || strings.HasSuffix(args[0], "/python") ||
+		args[0] == "python2" || strings.HasSuffix(args[0], "/python2") ||
+		args[0] == "python3" || strings.HasSuffix(args[0], "/python3"))
 }
 
-func (t pythonTransformer) IsApplicable(config imageConfiguration) bool {
-	// We can only put Python in debug mode by modifying the python command line,
-	// so looking for Python-related environment variables is insufficient.
-	if len(config.entrypoint) > 0 && !isEntrypointLauncher(config.entrypoint) {
-		return isLaunchingPython(config.entrypoint)
-	}
-	return isLaunchingPython(config.arguments)
-}
-
-// Apply configures a container definition for Python with pydev/ptvsd
-// Returns a simple map describing the debug configuration details.
-func (t pythonTransformer) Apply(container *v1.Container, config imageConfiguration, portAlloc portAllocator) (ContainerDebugConfiguration, string, error) {
-	logrus.Infof("Configuring %q for python debugging", container.Name)
-
-	// try to find existing `-mptvsd` command
-	spec := retrievePtvsdSpec(config)
-
-	if spec == nil {
-		spec = &ptvsdSpec{port: portAlloc(defaultPtvsdPort)}
-		switch {
-		case isLaunchingPython(config.entrypoint):
-			container.Command = rewritePythonCommandLine(config.entrypoint, *spec)
-
-		case (len(config.entrypoint) == 0 || isEntrypointLauncher(config.entrypoint)) && isLaunchingPython(config.arguments):
-			container.Args = rewritePythonCommandLine(config.arguments, *spec)
-
-		default:
-			return ContainerDebugConfiguration{}, "", fmt.Errorf("%q does not appear to invoke python", container.Name)
+func hasCommonPythonEnvVars(env map[string]string) bool {
+	for _, key := range []string{
+		"PYTHON_VERSION",
+		"PYTHONVERBOSE",
+		"PYTHONINSPECT",
+		"PYTHONOPTIMIZE",
+		"PYTHONUSERSITE",
+		"PYTHONUNBUFFERED",
+		"PYTHONPATH",
+		"PYTHONUSERBASE",
+		"PYTHONWARNINGS",
+		"PYTHONHOME",
+		"PYTHONCASEOK",
+		"PYTHONIOENCODING",
+		"PYTHONHASHSEED",
+		"PYTHONDONTWRITEBYTECODE",
+	} {
+		if _, found := env[key]; found {
+			return true
 		}
 	}
 
-	pyUserBase := "/dbg/python"
-	if existing, found := config.env["PYTHONUSERBASE"]; found {
-		// todo: handle windows containers?
-		pyUserBase = pyUserBase + ":" + existing
-	}
-	container.Env = setEnvVar(container.Env, "PYTHONUSERBASE", pyUserBase)
-	container.Ports = exposePort(container.Ports, "dap", spec.port)
+	return false
+}
 
-	return ContainerDebugConfiguration{
+func (t pythonTransformer) MatchRuntime(config ImageConfiguration) bool {
+	if config.RuntimeType == types.Runtimes.Python {
+		log.Entry(context.TODO()).Infof("Artifact %q has python runtime: specified by user in skaffold config", config.Artifact)
+		return true
+	}
+	return false
+}
+func (t pythonTransformer) IsApplicable(config ImageConfiguration) bool {
+	if hasCommonPythonEnvVars(config.Env) {
+		return true
+	}
+
+	if len(config.Entrypoint) > 0 && !isEntrypointLauncher(config.Entrypoint) {
+		return isLaunchingPython(config.Entrypoint)
+	}
+	return isLaunchingPython(config.Arguments)
+}
+
+// Apply configures a container definition for Python with ptvsd/debugpy/pydevd.
+// Returns a simple map describing the debug configuration details.
+func (t pythonTransformer) Apply(adapter types.ContainerAdapter, config ImageConfiguration, portAlloc PortAllocator, overrideProtocols []string) (types.ContainerDebugConfiguration, string, error) {
+	container := adapter.GetContainer()
+	log.Entry(context.TODO()).Infof("Configuring %q for python debugging", container.Name)
+
+	// try to find existing `-mptvsd` or `-mdebugpy` command
+	if spec := retrievePythonDebugSpec(config); spec != nil {
+		protocol := spec.protocol()
+		container.Ports = exposePort(container.Ports, protocol, spec.port)
+		return types.ContainerDebugConfiguration{
+			Runtime: "python",
+			Ports:   map[string]uint32{protocol: uint32(spec.port)},
+		}, "", nil
+	}
+
+	spec := createPythonDebugSpec(overrideProtocols, portAlloc)
+
+	switch {
+	case isLaunchingPython(config.Entrypoint):
+		container.Command = rewritePythonCommandLine(config.Entrypoint, *spec)
+
+	case (len(config.Entrypoint) == 0 || isEntrypointLauncher(config.Entrypoint)) && isLaunchingPython(config.Arguments):
+		container.Args = rewritePythonCommandLine(config.Arguments, *spec)
+
+	case hasCommonPythonEnvVars(config.Env):
+		container.Command = rewritePythonCommandLine(config.Entrypoint, *spec)
+
+	default:
+		return types.ContainerDebugConfiguration{}, "", fmt.Errorf("%q does not appear to invoke python", container.Name)
+	}
+
+	protocol := spec.protocol()
+	container.Ports = exposePort(container.Ports, protocol, spec.port)
+
+	return types.ContainerDebugConfiguration{
 		Runtime: "python",
-		Ports:   map[string]uint32{"dap": uint32(spec.port)},
+		Ports:   map[string]uint32{protocol: uint32(spec.port)},
 	}, "python", nil
 }
 
-func retrievePtvsdSpec(config imageConfiguration) *ptvsdSpec {
-	if spec := extractPtvsdArg(config.entrypoint); spec != nil {
+func retrievePythonDebugSpec(config ImageConfiguration) *pythonSpec {
+	if spec := extractPythonDebugSpec(config.Entrypoint); spec != nil {
 		return spec
 	}
-	if spec := extractPtvsdArg(config.arguments); spec != nil {
+	if spec := extractPythonDebugSpec(config.Arguments); spec != nil {
 		return spec
 	}
 	return nil
 }
 
-func extractPtvsdArg(args []string) *ptvsdSpec {
-	if !hasPtvsdModule(args) {
+func extractPythonDebugSpec(args []string) *pythonSpec {
+	if spec := extractPtvsdSpec(args); spec != nil {
+		return spec
+	}
+	if spec := extractDebugpySpec(args); spec != nil {
+		return spec
+	}
+	return nil
+}
+
+func createPythonDebugSpec(overrideProtocols []string, portAlloc PortAllocator) *pythonSpec {
+	for _, p := range overrideProtocols {
+		switch p {
+		case pydevdProtocol:
+			return &pythonSpec{debugger: pydevd, port: portAlloc(defaultPydevdPort)}
+		case dapProtocol:
+			return &pythonSpec{debugger: debugpy, port: portAlloc(defaultDebugpyPort)}
+		}
+	}
+
+	return &pythonSpec{debugger: debugpy, port: portAlloc(defaultDebugpyPort)}
+}
+
+func extractPtvsdSpec(args []string) *pythonSpec {
+	if !hasPyModule("ptvsd", args) {
 		return nil
 	}
-	spec := ptvsdSpec{port: defaultPtvsdPort}
+	spec := pythonSpec{debugger: ptvsd, port: defaultPtvsdPort}
 	for i, arg := range args {
 		switch arg {
 		case "--host":
@@ -127,7 +209,7 @@ func extractPtvsdArg(args []string) *ptvsdSpec {
 			port, err := strconv.ParseInt(args[i+1], 10, 32)
 			// spec.port, err := strconv.Atoi(args[i+1])
 			if err != nil {
-				logrus.Errorf("Invalid python ptvsd port %q: %s\n", args[i+1], err)
+				log.Entry(context.TODO()).Errorf("Invalid python ptvsd port %q: %s\n", args[i+1], err)
 				return nil
 			}
 			spec.port = int32(port)
@@ -139,14 +221,46 @@ func extractPtvsdArg(args []string) *ptvsdSpec {
 	return &spec
 }
 
-func hasPtvsdModule(args []string) bool {
-	if index := util.StrSliceIndex(args, "-mptvsd"); index >= 0 {
+func extractDebugpySpec(args []string) *pythonSpec {
+	if !hasPyModule("debugpy", args) {
+		return nil
+	}
+	spec := pythonSpec{debugger: debugpy, port: -1}
+	for i, arg := range args {
+		switch arg {
+		case "--listen":
+			if i == len(args)-1 {
+				return nil
+			}
+			s := strings.SplitN(args[i+1], ":", 2)
+			if len(s) > 1 {
+				spec.host = s[0]
+			}
+			port, err := strconv.ParseInt(s[len(s)-1], 10, 32)
+			if err != nil {
+				log.Entry(context.TODO()).Errorf("Invalid port %q: %s\n", args[i+1], err)
+				return nil
+			}
+			spec.port = int32(port)
+
+		case "--wait-for-client":
+			spec.wait = true
+		}
+	}
+	if spec.port < 0 {
+		return nil
+	}
+	return &spec
+}
+
+func hasPyModule(module string, args []string) bool {
+	if index := stringslice.Index(args, "-m"+module); index >= 0 {
 		return true
 	}
 	seenDashM := false
 	for _, value := range args {
 		if seenDashM {
-			if value == "ptvsd" {
+			if value == module {
 				return true
 			}
 			seenDashM = false
@@ -157,25 +271,45 @@ func hasPtvsdModule(args []string) bool {
 	return false
 }
 
-// rewritePythonCommandLine rewrites a python command-line to insert a `-mptvsd` etc
-func rewritePythonCommandLine(commandLine []string, spec ptvsdSpec) []string {
+// rewritePythonCommandLine rewrites a python command-line to use the debug-support's launcher.
+func rewritePythonCommandLine(commandLine []string, spec pythonSpec) []string {
 	// Assumes that commandLine[0] is "python" or "python3" etc
-	return util.StrSliceInsert(commandLine, 1, spec.asArguments())
+	return stringslice.Insert(commandLine, 0, spec.asArguments())
 }
 
-func (spec ptvsdSpec) asArguments() []string {
-	args := []string{"-mptvsd"}
-	// --host is a mandatory argument
-	if spec.host == "" {
-		args = append(args, "--host", "0.0.0.0")
-	} else {
-		args = append(args, "--host", spec.host)
-	}
+func (spec pythonSpec) asArguments() []string {
+	args := []string{"/dbg/python/launcher", "--mode", spec.launcherMode()}
 	if spec.port >= 0 {
 		args = append(args, "--port", strconv.FormatInt(int64(spec.port), 10))
 	}
 	if spec.wait {
 		args = append(args, "--wait")
 	}
+	args = append(args, "--")
 	return args
+}
+
+func (spec pythonSpec) launcherMode() string {
+	switch spec.debugger {
+	case pydevd:
+		return "pydevd"
+	case ptvsd:
+		return "ptvsd"
+	case debugpy:
+		return "debugpy"
+	}
+	log.Entry(context.TODO()).Fatalf("invalid debugger type: %q", spec.debugger)
+	return ""
+}
+
+func (spec pythonSpec) protocol() string {
+	switch spec.debugger {
+	case pydevd:
+		return pydevdProtocol
+	case debugpy, ptvsd:
+		return dapProtocol
+	default:
+		log.Entry(context.TODO()).Fatalf("invalid debugger type: %q", spec.debugger)
+		return dapProtocol
+	}
 }

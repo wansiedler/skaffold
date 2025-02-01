@@ -1,0 +1,32 @@
+apiVersion: skaffold/v4beta12
+kind: Config
+build:
+  tagPolicy:
+    sha256: {}
+  artifacts:
+  - image: us-central1-docker.pkg.dev/k8s-skaffold/testing/skaffold-helm
+manifests:
+  helm:
+    releases:
+    - name: skaffold-helm
+      chartPath: skaffold-helm
+profiles:
+- name: helm-render
+  manifests:
+    helm:
+      releases:
+      - name: skaffold-helm
+        chartPath: skaffold-helm
+        setValues:
+          pullPolicy: always
+- name: helm-render-with-global-flags
+  manifests:
+    helm:
+      flags:
+        global:
+        - "--debug"
+      releases:
+      - name: skaffold-helm
+        chartPath: skaffold-helm
+        setValues:
+          pullPolicy: always

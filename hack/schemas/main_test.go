@@ -18,14 +18,13 @@ package main
 
 import (
 	"bytes"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/xeipuuv/gojsonschema"
 
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestSchemas(t *testing.T) {
@@ -35,7 +34,7 @@ func TestSchemas(t *testing.T) {
 	}
 
 	if !same {
-		t.Fatal("json schema files are not up to date. Please run `make generate-schemas` and commit the changes.")
+		t.Fatal("json schema files are not up to date. Please run `make generate-schemas` and `make generate-schemas-v2`and commit the changes.")
 	}
 }
 
@@ -46,6 +45,7 @@ func TestGenerators(t *testing.T) {
 		{name: "inline"},
 		{name: "inline-anyof"},
 		{name: "inline-hybrid"},
+		{name: "inline-skiptrim"},
 		{name: "integer"},
 	}
 	for _, test := range tests {
@@ -60,18 +60,39 @@ func TestGenerators(t *testing.T) {
 			actual, err := generator.Apply(input)
 			t.CheckNoError(err)
 
-			expected, err := ioutil.ReadFile(expectedOutput)
+			expected, err := os.ReadFile(expectedOutput)
 			t.CheckNoError(err)
 
-			expected = bytes.Replace(expected, []byte("\r\n"), []byte("\n"), -1)
-
-			schemaLoader := gojsonschema.NewBytesLoader(actual)
-			_, err = gojsonschema.NewSchema(schemaLoader)
-			t.CheckNoError(err)
+			expected = bytes.ReplaceAll(expected, []byte("\r\n"), []byte("\n"))
 
 			if diff := cmp.Diff(string(actual), string(expected)); diff != "" {
 				t.Errorf("%T differ (-got, +want): %s\n actual:\n%s", string(expected), diff, string(actual))
 				return
+			}
+		})
+	}
+}
+
+func TestGeneratorErrors(t *testing.T) {
+	tests := []struct {
+		name          string
+		shouldErr     bool
+		expectedError string
+	}{
+		{name: "invalid-schema", shouldErr: true, expectedError: "Object has no key 'InlineStruct'"},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.name, func(t *testutil.T) {
+			input := filepath.Join("testdata", test.name, "input.go")
+
+			generator := schemaGenerator{
+				strict: false,
+			}
+
+			_, err := generator.Apply(input)
+			t.CheckError(test.shouldErr, err)
+			if test.expectedError != "" {
+				t.CheckErrorContains(test.expectedError, err)
 			}
 		})
 	}

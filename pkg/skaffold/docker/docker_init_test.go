@@ -20,8 +20,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestValidate(t *testing.T) {
@@ -89,13 +89,18 @@ func TestDescribe(t *testing.T) {
 func TestArtifactType(t *testing.T) {
 	tests := []struct {
 		description  string
+		workspace    string
 		config       ArtifactConfig
 		expectedType latest.ArtifactType
 	}{
 		{
-			description:  "default filename",
-			config:       ArtifactConfig{File: filepath.Join("path", "to", "Dockerfile")},
-			expectedType: latest.ArtifactType{},
+			description: "default filename",
+			config:      ArtifactConfig{File: filepath.Join("path", "to", "Dockerfile")},
+			expectedType: latest.ArtifactType{
+				DockerArtifact: &latest.DockerArtifact{
+					DockerfilePath: "Dockerfile",
+				},
+			},
 		},
 		{
 			description: "non-default filename",
@@ -106,10 +111,20 @@ func TestArtifactType(t *testing.T) {
 				},
 			},
 		},
+		{
+			description: "with workspace",
+			config:      ArtifactConfig{File: filepath.Join("path", "to", "Dockerfile")},
+			workspace:   "path",
+			expectedType: latest.ArtifactType{
+				DockerArtifact: &latest.DockerArtifact{
+					DockerfilePath: "to/Dockerfile",
+				},
+			},
+		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			at := test.config.ArtifactType()
+			at := test.config.ArtifactType(test.workspace)
 
 			t.CheckDeepEqual(test.expectedType, at)
 		})

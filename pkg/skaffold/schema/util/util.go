@@ -18,12 +18,13 @@ package util
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 
 	yamlpatch "github.com/krishicks/yaml-patch"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/yaml"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/yaml"
 )
 
 type VersionedConfig interface {
@@ -35,6 +36,9 @@ type VersionedConfig interface {
 type HelmOverrides struct {
 	Values map[string]interface{} `yaml:",inline"`
 }
+
+// FlatMap flattens deeply nested yaml into a map with corresponding dot separated keys
+type FlatMap map[string]string
 
 // MarshalJSON implements JSON marshalling by including the value as an inline yaml fragment.
 func (h *HelmOverrides) MarshalJSON() ([]byte, error) {
@@ -80,6 +84,42 @@ func (n *YamlpatchNode) MarshalYAML() (interface{}, error) {
 // UnmarshalYAML implements yaml.Unmarshaler
 func (n *YamlpatchNode) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return n.Node.UnmarshalYAML(unmarshal)
+}
+
+func (m *FlatMap) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var obj map[string]interface{}
+	if err := unmarshal(&obj); err != nil {
+		return err
+	}
+	result := make(map[string]string)
+	buildFlatMap(obj, result, "")
+	*m = result
+	return nil
+}
+
+func buildFlatList(list []interface{}, result map[string]string, parentK string) {
+	for idx, item := range list {
+		currK := fmt.Sprintf("%v[%d]", parentK, idx)
+		processItem(item, result, currK)
+	}
+}
+
+func buildFlatMap(obj map[string]interface{}, result map[string]string, parentK string) {
+	for key, item := range obj {
+		currK := fmt.Sprintf("%v%v", parentK, key)
+		processItem(item, result, currK)
+	}
+}
+
+func processItem(item interface{}, result map[string]string, currK string) {
+	switch v := item.(type) {
+	case map[string]interface{}:
+		buildFlatMap(v, result, fmt.Sprintf("%v.", currK))
+	case []interface{}:
+		buildFlatList(v, result, currK)
+	default:
+		result[currK] = fmt.Sprintf("%v", v)
+	}
 }
 
 func marshalInlineYaml(in interface{}) ([]byte, error) {

@@ -21,15 +21,15 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/docker/docker/pkg/fileutils"
+	"github.com/moby/patternmatcher"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/walk"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/walk"
 )
 
 // NewDockerIgnorePredicate creates a walk.Predicate that checks if directory entries
 // should be ignored.
 func NewDockerIgnorePredicate(workspace string, excludes []string) (walk.Predicate, error) {
-	matcher, err := fileutils.NewPatternMatcher(excludes)
+	matcher, err := patternmatcher.New(excludes)
 	if err != nil {
 		return nil, fmt.Errorf("invalid exclude patterns: %w", err)
 	}
@@ -39,8 +39,7 @@ func NewDockerIgnorePredicate(workspace string, excludes []string) (walk.Predica
 		if err != nil {
 			return false, err
 		}
-
-		ignored, err := matcher.Matches(relPath)
+		ignored, err := matcher.MatchesOrParentMatches(relPath)
 		if err != nil {
 			return false, err
 		}
@@ -54,7 +53,7 @@ func NewDockerIgnorePredicate(workspace string, excludes []string) (walk.Predica
 }
 
 // exclusion handling closely follows vendor/github.com/docker/docker/pkg/archive/archive.go
-func skipDir(relPath string, matcher *fileutils.PatternMatcher) bool {
+func skipDir(relPath string, matcher *patternmatcher.PatternMatcher) bool {
 	// No exceptions (!...) in patterns so just skip dir
 	if !matcher.Exclusions() {
 		return true
@@ -71,6 +70,5 @@ func skipDir(relPath string, matcher *fileutils.PatternMatcher) bool {
 			return false
 		}
 	}
-
 	return true
 }

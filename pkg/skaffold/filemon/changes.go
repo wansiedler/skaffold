@@ -17,13 +17,14 @@ limitations under the License.
 package filemon
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/sirupsen/logrus"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
 )
 
 // FileMap is a map of filename to modification times.
@@ -40,7 +41,7 @@ func Stat(deps func() ([]string, error)) (FileMap, error) {
 		stat, err := os.Stat(path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				logrus.Debugf("could not stat dependency: %s", err)
+				log.Entry(context.TODO()).Debugf("could not stat dependency: %s", err)
 				continue // Ignore files that don't exist
 			}
 			return nil, fmt.Errorf("unable to stat file %q: %w", path, err)
@@ -116,13 +117,13 @@ func sortEvents(e Events) {
 }
 
 func logEvents(e Events) {
-	if e.Added != nil && len(e.Added) > 0 {
-		logrus.Infof("files added: %v", e.Added)
+	if len(e.Added) > 0 {
+		log.Entry(context.TODO()).Infof("files added: %v", e.Added)
 	}
-	if e.Modified != nil && len(e.Modified) > 0 {
-		logrus.Infof("files modified: %v", e.Modified)
+	if len(e.Modified) > 0 {
+		log.Entry(context.TODO()).Infof("files modified: %v", e.Modified)
 	}
-	if e.Deleted != nil && len(e.Deleted) > 0 {
-		logrus.Infof("files deleted: %v", e.Deleted)
+	if len(e.Deleted) > 0 {
+		log.Entry(context.TODO()).Infof("files deleted: %v", e.Deleted)
 	}
 }

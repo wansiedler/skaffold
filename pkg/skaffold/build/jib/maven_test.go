@@ -20,17 +20,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/containerd/containerd/platforms"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestBuildJibMavenToDocker(t *testing.T) {
@@ -56,6 +60,13 @@ func TestBuildJibMavenToDocker(t *testing.T) {
 			),
 		},
 		{
+			description: "build with custom base image",
+			artifact:    &latest.JibArtifact{BaseImage: "docker://busybox"},
+			commands: testutil.CmdRun(
+				"mvn fake-mavenBuildArgs-for-dockerBuild -Djib.from.image=docker://busybox -Dimage=img:tag",
+			),
+		},
+		{
 			description: "fail build",
 			artifact:    &latest.JibArtifact{},
 			commands: testutil.CmdRunErr(
@@ -73,14 +84,14 @@ func TestBuildJibMavenToDocker(t *testing.T) {
 			t.NewTempDir().Touch("pom.xml").Chdir()
 			t.Override(&util.DefaultExecCommand, test.commands)
 			api := (&testutil.FakeAPIClient{}).Add("img:tag", "imageID")
-			localDocker := docker.NewLocalDaemon(api, nil, false, nil)
+			localDocker := fakeLocalDaemon(api)
 
-			builder := NewArtifactBuilder(localDocker, nil, false, false)
-			result, err := builder.Build(context.Background(), ioutil.Discard, &latest.Artifact{
+			builder := NewArtifactBuilder(localDocker, &mockConfig{}, false, false, mockArtifactResolver{})
+			result, err := builder.Build(context.Background(), io.Discard, &latest.Artifact{
 				ArtifactType: latest.ArtifactType{
 					JibArtifact: test.artifact,
 				},
-			}, "img:tag")
+			}, "img:tag", platform.Matcher{})
 
 			t.CheckError(test.shouldErr, err)
 			if test.shouldErr {
@@ -111,6 +122,11 @@ func TestBuildJibMavenToRegistry(t *testing.T) {
 			commands:    testutil.CmdRun("mvn fake-mavenBuildArgs-for-module-for-build -Dimage=img:tag"),
 		},
 		{
+			description: "build with custom base image",
+			artifact:    &latest.JibArtifact{BaseImage: "docker://busybox"},
+			commands:    testutil.CmdRun("mvn fake-mavenBuildArgs-for-build -Djib.from.image=docker://busybox -Dimage=img:tag"),
+		},
+		{
 			description: "fail build",
 			artifact:    &latest.JibArtifact{},
 			commands: testutil.CmdRunErr(
@@ -127,20 +143,20 @@ func TestBuildJibMavenToRegistry(t *testing.T) {
 			t.Override(&mavenBuildArgsFunc, getMavenBuildArgsFuncFake(t, MinimumJibMavenVersion))
 			t.NewTempDir().Touch("pom.xml").Chdir()
 			t.Override(&util.DefaultExecCommand, test.commands)
-			t.Override(&docker.RemoteDigest, func(identifier string, _ map[string]bool) (string, error) {
+			t.Override(&docker.RemoteDigest, func(identifier string, _ docker.Config, _ []v1.Platform) (string, error) {
 				if identifier == "img:tag" {
 					return "digest", nil
 				}
 				return "", errors.New("unknown remote tag")
 			})
-			localDocker := docker.NewLocalDaemon(&testutil.FakeAPIClient{}, nil, false, nil)
+			localDocker := fakeLocalDaemon(&testutil.FakeAPIClient{})
 
-			builder := NewArtifactBuilder(localDocker, nil, true, false)
-			result, err := builder.Build(context.Background(), ioutil.Discard, &latest.Artifact{
+			builder := NewArtifactBuilder(localDocker, &mockConfig{}, true, false, mockArtifactResolver{})
+			result, err := builder.Build(context.Background(), io.Discard, &latest.Artifact{
 				ArtifactType: latest.ArtifactType{
 					JibArtifact: test.artifact,
 				},
-			}, "img:tag")
+			}, "img:tag", platform.Matcher{})
 
 			t.CheckError(test.shouldErr, err)
 			if test.shouldErr {
@@ -216,10 +232,11 @@ func TestGetDependenciesMaven(t *testing.T) {
 			if err := os.Chtimes(build, test.modTime, test.modTime); err != nil {
 				t.Fatal(err)
 			}
-
-			deps, err := getDependenciesMaven(ctx, tmpDir.Root(), &latest.JibArtifact{Project: "maven-test"})
+			ws := tmpDir.Root()
+			deps, err := getDependenciesMaven(ctx, ws, &latest.JibArtifact{Project: "maven-test"})
 			if test.err != nil {
-				t.CheckErrorAndDeepEqual(true, err, "getting jib-maven dependencies: initial Jib dependency refresh failed: failed to get Jib dependencies: "+test.err.Error(), err.Error())
+				prefix := fmt.Sprintf("could not fetch dependencies for workspace %s: initial Jib dependency refresh failed: failed to get Jib dependencies: ", ws)
+				t.CheckErrorAndDeepEqual(true, err, prefix+test.err.Error(), err.Error())
 			} else {
 				t.CheckDeepEqual(test.expected, deps)
 			}
@@ -315,21 +332,69 @@ func TestGenerateMavenBuildArgs(t *testing.T) {
 	tests := []struct {
 		description        string
 		a                  latest.JibArtifact
+		platforms          platform.Matcher
+		deps               []*latest.ArtifactDependency
 		image              string
+		expectedMinVersion string
+		r                  ArtifactResolver
 		skipTests          bool
+		pushImages         bool
 		insecureRegistries map[string]bool
 		out                []string
 	}{
-		{"single module", latest.JibArtifact{}, "image", false, nil, []string{"fake-mavenBuildArgs-for-test-goal", "-Dimage=image"}},
-		{"single module without tests", latest.JibArtifact{}, "image", true, nil, []string{"fake-mavenBuildArgs-for-test-goal-skipTests", "-Dimage=image"}},
-		{"multi module", latest.JibArtifact{Project: "module"}, "image", false, nil, []string{"fake-mavenBuildArgs-for-module-for-test-goal", "-Dimage=image"}},
-		{"multi module without tests", latest.JibArtifact{Project: "module"}, "image", true, nil, []string{"fake-mavenBuildArgs-for-module-for-test-goal-skipTests", "-Dimage=image"}},
-		{"multi module without tests with insecure-registry", latest.JibArtifact{Project: "module"}, "registry.tld/image", true, map[string]bool{"registry.tld": true}, []string{"fake-mavenBuildArgs-for-module-for-test-goal-skipTests", "-Djib.allowInsecureRegistries=true", "-Dimage=registry.tld/image"}},
+		{description: "single module", image: "image", out: []string{"fake-mavenBuildArgs-for-test-goal", "-Dimage=image"}},
+		{description: "single module without tests", image: "image", skipTests: true, out: []string{"fake-mavenBuildArgs-for-test-goal-skipTests", "-Dimage=image"}},
+		{description: "multi module", a: latest.JibArtifact{Project: "module"}, image: "image", out: []string{"fake-mavenBuildArgs-for-module-for-test-goal", "-Dimage=image"}},
+		{description: "multi module without tests", a: latest.JibArtifact{Project: "module"}, image: "image", skipTests: true, out: []string{"fake-mavenBuildArgs-for-module-for-test-goal-skipTests", "-Dimage=image"}},
+		{description: "multi module without tests with insecure-registry", a: latest.JibArtifact{Project: "module"}, image: "registry.tld/image", skipTests: true, insecureRegistries: map[string]bool{"registry.tld": true}, out: []string{"fake-mavenBuildArgs-for-module-for-test-goal-skipTests", "-Djib.allowInsecureRegistries=true", "-Dimage=registry.tld/image"}},
+		{description: "single module with custom base image", a: latest.JibArtifact{BaseImage: "docker://busybox"}, image: "image", out: []string{"fake-mavenBuildArgs-for-test-goal", "-Djib.from.image=docker://busybox", "-Dimage=image"}},
+		{description: "multi module with custom base image", a: latest.JibArtifact{Project: "module", BaseImage: "docker://busybox"}, image: "image", out: []string{"fake-mavenBuildArgs-for-module-for-test-goal", "-Djib.from.image=docker://busybox", "-Dimage=image"}},
+		{description: "host platform", image: "image", platforms: platform.Matcher{Platforms: []v1.Platform{platforms.DefaultSpec()}}, out: []string{"fake-mavenBuildArgs-for-test-goal", fmt.Sprintf("-Djib.from.platforms=%s", platform.Format(platforms.DefaultSpec())), "-Dimage=image"}},
+		{description: "cross-platform", image: "image", platforms: platform.Matcher{Platforms: []v1.Platform{{OS: "freebsd", Architecture: "arm"}}}, out: []string{"fake-mavenBuildArgs-for-test-goal", "-Djib.from.platforms=freebsd/arm", "-Dimage=image"}, expectedMinVersion: MinimumJibMavenVersionForCrossPlatform},
+		{description: "multi-platform", image: "image", platforms: platform.Matcher{Platforms: []v1.Platform{{OS: "linux", Architecture: "amd64"}, {OS: "darwin", Architecture: "arm64"}}}, out: []string{"fake-mavenBuildArgs-for-test-goal", "-Djib.from.platforms=linux/amd64,darwin/arm64", "-Dimage=image"}, expectedMinVersion: MinimumJibMavenVersionForCrossPlatform},
+		{
+			description: "single module with local base image from required artifacts",
+			a:           latest.JibArtifact{BaseImage: "alias"},
+			deps:        []*latest.ArtifactDependency{{ImageName: "img", Alias: "alias"}},
+			image:       "image",
+			r:           mockArtifactResolver{m: map[string]string{"img": "img:tag"}},
+			out:         []string{"fake-mavenBuildArgs-for-test-goal", "-Djib.from.image=docker://img:tag", "-Dimage=image"},
+		},
+		{
+			description: "multi module with local base image from required artifacts",
+			a:           latest.JibArtifact{Project: "module", BaseImage: "alias"},
+			deps:        []*latest.ArtifactDependency{{ImageName: "img", Alias: "alias"}},
+			image:       "image",
+			r:           mockArtifactResolver{m: map[string]string{"img": "img:tag"}},
+			out:         []string{"fake-mavenBuildArgs-for-module-for-test-goal", "-Djib.from.image=docker://img:tag", "-Dimage=image"},
+		},
+		{
+			description: "single module with remote base image from required artifacts",
+			a:           latest.JibArtifact{BaseImage: "alias"},
+			deps:        []*latest.ArtifactDependency{{ImageName: "img", Alias: "alias"}},
+			image:       "image",
+			pushImages:  true,
+			r:           mockArtifactResolver{m: map[string]string{"img": "img:tag"}},
+			out:         []string{"fake-mavenBuildArgs-for-test-goal", "-Djib.from.image=img:tag", "-Dimage=image"},
+		},
+		{
+			description: "multi module with remote base image from required artifacts",
+			a:           latest.JibArtifact{Project: "module", BaseImage: "alias"},
+			deps:        []*latest.ArtifactDependency{{ImageName: "img", Alias: "alias"}},
+			image:       "image",
+			pushImages:  true,
+			r:           mockArtifactResolver{m: map[string]string{"img": "img:tag"}},
+			out:         []string{"fake-mavenBuildArgs-for-module-for-test-goal", "-Djib.from.image=img:tag", "-Dimage=image"},
+		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			t.Override(&mavenBuildArgsFunc, getMavenBuildArgsFuncFake(t, MinimumJibMavenVersion))
-			args := GenerateMavenBuildArgs("test-goal", test.image, &test.a, test.skipTests, test.insecureRegistries)
+			minVersion := MinimumJibMavenVersion
+			if test.expectedMinVersion != "" {
+				minVersion = test.expectedMinVersion
+			}
+			t.Override(&mavenBuildArgsFunc, getMavenBuildArgsFuncFake(t, minVersion))
+			args := GenerateMavenBuildArgs("test-goal", test.image, &test.a, test.platforms, test.skipTests, test.pushImages, test.deps, test.r, test.insecureRegistries, false)
 			t.CheckDeepEqual(test.out, args)
 		})
 	}
@@ -348,14 +413,14 @@ func TestMavenBuildArgs(t *testing.T) {
 			jibArtifact: latest.JibArtifact{},
 			skipTests:   false,
 			showColors:  true,
-			expected:    []string{"-Djib.console=plain", "fake-mavenArgs", "prepare-package", "jib:test-goal"},
+			expected:    []string{"-Dstyle.color=always", "-Djansi.passthrough=true", "-Djib.console=plain", "fake-mavenArgs", "prepare-package", "jib:test-goal"},
 		},
 		{
 			description: "single module skip tests",
 			jibArtifact: latest.JibArtifact{},
 			skipTests:   true,
 			showColors:  true,
-			expected:    []string{"-Djib.console=plain", "fake-mavenArgs", "-DskipTests=true", "prepare-package", "jib:test-goal"},
+			expected:    []string{"-Dstyle.color=always", "-Djansi.passthrough=true", "-Djib.console=plain", "fake-mavenArgs", "-DskipTests=true", "prepare-package", "jib:test-goal"},
 		},
 		{
 			description: "single module plain console",
@@ -369,14 +434,14 @@ func TestMavenBuildArgs(t *testing.T) {
 			jibArtifact: latest.JibArtifact{Project: "module"},
 			skipTests:   false,
 			showColors:  true,
-			expected:    []string{"-Djib.console=plain", "fake-mavenArgs-for-module", "package", "jib:test-goal", "-Djib.containerize=module"},
+			expected:    []string{"-Dstyle.color=always", "-Djansi.passthrough=true", "-Djib.console=plain", "fake-mavenArgs-for-module", "package", "jib:test-goal", "-Djib.containerize=module"},
 		},
 		{
 			description: "single module skip tests",
 			jibArtifact: latest.JibArtifact{Project: "module"},
 			skipTests:   true,
 			showColors:  true,
-			expected:    []string{"-Djib.console=plain", "fake-mavenArgs-for-module", "-DskipTests=true", "package", "jib:test-goal", "-Djib.containerize=module"},
+			expected:    []string{"-Dstyle.color=always", "-Djansi.passthrough=true", "-Djib.console=plain", "fake-mavenArgs-for-module", "-DskipTests=true", "package", "jib:test-goal", "-Djib.containerize=module"},
 		},
 	}
 	for _, test := range tests {

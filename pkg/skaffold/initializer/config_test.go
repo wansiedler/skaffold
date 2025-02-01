@@ -22,35 +22,42 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/initializer/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/initializer/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 type stubDeploymentInitializer struct {
-	config   latest.DeployConfig
+	config latest.DeployConfig
+}
+
+func (s stubDeploymentInitializer) DeployConfig() latest.DeployConfig {
+	return s.config
+}
+
+type stubRendererInitializer struct {
+	config   latest.RenderConfig
 	profiles []latest.Profile
 }
 
-func (s stubDeploymentInitializer) DeployConfig() (latest.DeployConfig, []latest.Profile) {
+func (s stubRendererInitializer) RenderConfig() (latest.RenderConfig, []latest.Profile) {
 	return s.config, s.profiles
 }
-
-func (s stubDeploymentInitializer) GetImages() []string {
+func (s stubRendererInitializer) GetImages() []string {
 	panic("implement me")
 }
 
-func (s stubDeploymentInitializer) Validate() error {
+func (s stubRendererInitializer) Validate() error {
 	panic("no thanks")
 }
 
-func (s stubDeploymentInitializer) AddManifestForImage(string, string) {
+func (s stubRendererInitializer) AddManifestForImage(string, string) {
 	panic("don't call me")
 }
 
 type stubBuildInitializer struct {
-	pairs []build.BuilderImagePair
+	artifactInfos []build.ArtifactInfo
 }
 
 func (s stubBuildInitializer) ProcessImages([]string) error {
@@ -61,13 +68,13 @@ func (s stubBuildInitializer) PrintAnalysis(io.Writer) error {
 	panic("no sir")
 }
 
-func (s stubBuildInitializer) BuildConfig() latest.BuildConfig {
+func (s stubBuildInitializer) BuildConfig() (latest.BuildConfig, []*latest.PortForwardResource) {
 	return latest.BuildConfig{
-		Artifacts: build.Artifacts(s.pairs),
-	}
+		Artifacts: build.Artifacts(s.artifactInfos),
+	}, nil
 }
 
-func (s stubBuildInitializer) GenerateManifests() (map[build.GeneratedBuilderImagePair][]byte, error) {
+func (s stubBuildInitializer) GenerateManifests(io.Writer, bool, bool) (map[build.GeneratedArtifactInfo][]byte, error) {
 	panic("no thank you")
 }
 
@@ -76,14 +83,16 @@ func TestGenerateSkaffoldConfig(t *testing.T) {
 		name                   string
 		expectedSkaffoldConfig *latest.SkaffoldConfig
 		deployConfig           latest.DeployConfig
+		renderConfig           latest.RenderConfig
 		profiles               []latest.Profile
-		builderConfigPairs     []build.BuilderImagePair
+		builderConfigInfos     []build.ArtifactInfo
 		getWd                  func() (string, error)
 	}{
 		{
 			name:               "empty",
-			builderConfigPairs: []build.BuilderImagePair{},
+			builderConfigInfos: []build.ArtifactInfo{},
 			deployConfig:       latest.DeployConfig{},
+			renderConfig:       latest.RenderConfig{},
 			getWd: func() (s string, err error) {
 				return filepath.Join("rootDir", "testConfig"), nil
 			},
@@ -92,13 +101,13 @@ func TestGenerateSkaffoldConfig(t *testing.T) {
 				Kind:       "Config",
 				Metadata:   latest.Metadata{Name: "testconfig"},
 				Pipeline: latest.Pipeline{
-					Deploy: latest.DeployConfig{},
+					Render: latest.RenderConfig{},
 				},
 			},
 		},
 		{
 			name: "root dir + builder image pairs",
-			builderConfigPairs: []build.BuilderImagePair{
+			builderConfigInfos: []build.ArtifactInfo{
 				{
 					Builder: docker.ArtifactConfig{
 						File: "testDir/Dockerfile",
@@ -107,6 +116,7 @@ func TestGenerateSkaffoldConfig(t *testing.T) {
 				},
 			},
 			deployConfig: latest.DeployConfig{},
+			renderConfig: latest.RenderConfig{},
 			getWd: func() (s string, err error) {
 				return string(filepath.Separator), nil
 			},
@@ -120,17 +130,22 @@ func TestGenerateSkaffoldConfig(t *testing.T) {
 							{
 								ImageName: "image1",
 								Workspace: "testDir",
+								ArtifactType: latest.ArtifactType{
+									DockerArtifact: &latest.DockerArtifact{DockerfilePath: "Dockerfile"},
+								},
 							},
 						},
 					},
+					Render: latest.RenderConfig{},
 					Deploy: latest.DeployConfig{},
 				},
 			},
 		},
 		{
 			name:               "error working dir",
-			builderConfigPairs: []build.BuilderImagePair{},
+			builderConfigInfos: []build.ArtifactInfo{},
 			deployConfig:       latest.DeployConfig{},
+			renderConfig:       latest.RenderConfig{},
 			getWd: func() (s string, err error) {
 				return "", errors.New("testError")
 			},
@@ -146,13 +161,16 @@ func TestGenerateSkaffoldConfig(t *testing.T) {
 		testutil.Run(t, test.name, func(t *testutil.T) {
 			deploymentInitializer := stubDeploymentInitializer{
 				test.deployConfig,
-				test.profiles,
 			}
 			buildInitializer := stubBuildInitializer{
-				test.builderConfigPairs,
+				test.builderConfigInfos,
+			}
+			rendererInitializer := stubRendererInitializer{
+				test.renderConfig,
+				test.profiles,
 			}
 			t.Override(&getWd, test.getWd)
-			config := generateSkaffoldConfig(buildInitializer, deploymentInitializer)
+			config := generateSkaffoldConfig(buildInitializer, rendererInitializer, deploymentInitializer)
 			t.CheckDeepEqual(config, test.expectedSkaffoldConfig)
 		})
 	}

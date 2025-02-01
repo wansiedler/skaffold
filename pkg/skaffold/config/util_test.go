@@ -17,28 +17,40 @@ limitations under the License.
 package config
 
 import (
+	"context"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/yaml"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/google/uuid"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/cluster"
+	kubeclient "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/client"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/yaml"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestReadConfig(t *testing.T) {
 	baseConfig := &GlobalConfig{
 		Global: &ContextConfig{
-			DefaultRepo: "test-repository",
+			DefaultRepo:    "test-repository",
+			MultiLevelRepo: util.Ptr(false),
 		},
 		ContextConfigs: []*ContextConfig{
 			{
 				Kubecontext:        "test-context",
 				InsecureRegistries: []string{"bad.io", "worse.io"},
-				LocalCluster:       util.BoolPtr(true),
+				LocalCluster:       util.Ptr(true),
 				DefaultRepo:        "context-local-repository",
+				MultiLevelRepo:     util.Ptr(true),
 			},
 		},
 	}
@@ -101,13 +113,15 @@ func Test_getConfigForKubeContextWithGlobalDefaults(t *testing.T) {
 	sampleConfig1 := &ContextConfig{
 		Kubecontext:        someKubeContext,
 		InsecureRegistries: []string{"bad.io", "worse.io"},
-		LocalCluster:       util.BoolPtr(true),
+		LocalCluster:       util.Ptr(true),
 		DefaultRepo:        "my-private-registry",
+		MultiLevelRepo:     util.Ptr(true),
 	}
 	sampleConfig2 := &ContextConfig{
-		Kubecontext:  "another_context",
-		LocalCluster: util.BoolPtr(false),
-		DefaultRepo:  "my-public-registry",
+		Kubecontext:    "another_context",
+		LocalCluster:   util.Ptr(false),
+		DefaultRepo:    "my-public-registry",
+		MultiLevelRepo: util.Ptr(false),
 	}
 
 	tests := []struct {
@@ -121,8 +135,9 @@ func Test_getConfigForKubeContextWithGlobalDefaults(t *testing.T) {
 			cfg: &GlobalConfig{
 				Global: &ContextConfig{
 					InsecureRegistries: []string{"mediocre.io"},
-					LocalCluster:       util.BoolPtr(true),
+					LocalCluster:       util.Ptr(true),
 					DefaultRepo:        "my-private-registry",
+					MultiLevelRepo:     util.Ptr(true),
 				},
 				ContextConfigs: []*ContextConfig{
 					{
@@ -133,8 +148,9 @@ func Test_getConfigForKubeContextWithGlobalDefaults(t *testing.T) {
 			},
 			expectedConfig: &ContextConfig{
 				InsecureRegistries: []string{"mediocre.io"},
-				LocalCluster:       util.BoolPtr(true),
+				LocalCluster:       util.Ptr(true),
 				DefaultRepo:        "my-private-registry",
+				MultiLevelRepo:     util.Ptr(true),
 			},
 		},
 		{
@@ -179,9 +195,10 @@ func Test_getConfigForKubeContextWithGlobalDefaults(t *testing.T) {
 				},
 			},
 			expectedConfig: &ContextConfig{
-				Kubecontext:  someKubeContext,
-				LocalCluster: util.BoolPtr(false),
-				DefaultRepo:  "my-public-registry",
+				Kubecontext:    someKubeContext,
+				LocalCluster:   util.Ptr(false),
+				DefaultRepo:    "my-public-registry",
+				MultiLevelRepo: util.Ptr(false),
 			},
 		},
 		{
@@ -189,9 +206,10 @@ func Test_getConfigForKubeContextWithGlobalDefaults(t *testing.T) {
 			kubecontext: someKubeContext,
 			cfg:         &GlobalConfig{Global: sampleConfig2},
 			expectedConfig: &ContextConfig{
-				Kubecontext:  someKubeContext,
-				LocalCluster: util.BoolPtr(false),
-				DefaultRepo:  "my-public-registry",
+				Kubecontext:    someKubeContext,
+				LocalCluster:   util.Ptr(false),
+				DefaultRepo:    "my-public-registry",
+				MultiLevelRepo: util.Ptr(false),
 			},
 		},
 		{
@@ -235,12 +253,12 @@ func TestIsUpdateCheckEnabled(t *testing.T) {
 		},
 		{
 			description: "config update-check is true",
-			cfg:         &ContextConfig{UpdateCheck: util.BoolPtr(true)},
+			cfg:         &ContextConfig{UpdateCheck: util.Ptr(true)},
 			expected:    true,
 		},
 		{
 			description: "config update-check is false",
-			cfg:         &ContextConfig{UpdateCheck: util.BoolPtr(false)},
+			cfg:         &ContextConfig{UpdateCheck: util.Ptr(false)},
 		},
 		{
 			description: "config is nil",
@@ -263,52 +281,147 @@ func TestIsUpdateCheckEnabled(t *testing.T) {
 	}
 }
 
-func TestIsDefaultLocal(t *testing.T) {
-	tests := []struct {
-		context       string
-		expectedLocal bool
-	}{
-		{context: "kind-other", expectedLocal: true},
-		{context: "kind@kind", expectedLocal: true},
-		{context: "k3d-k3s-default", expectedLocal: true},
-		{context: "docker-for-desktop", expectedLocal: true},
-		{context: "minikube", expectedLocal: true},
-		{context: "docker-desktop", expectedLocal: true},
-		{context: "anything-else", expectedLocal: false},
-		{context: "kind@blah", expectedLocal: false},
-		{context: "other-kind", expectedLocal: false},
-		{context: "not-k3d", expectedLocal: false},
-	}
-	for _, test := range tests {
-		testutil.Run(t, "", func(t *testutil.T) {
-			local := isDefaultLocal(test.context)
+type fakeClient struct{}
 
-			t.CheckDeepEqual(test.expectedLocal, local)
-		})
-	}
+func (fakeClient) IsMinikube(ctx context.Context, kubeContext string) bool {
+	return kubeContext == "minikube"
 }
+func (fakeClient) MinikubeExec(context.Context, ...string) (*exec.Cmd, error) { return nil, nil }
 
-func TestIsImageLoadingRequired(t *testing.T) {
+func TestGetCluster(t *testing.T) {
+	var defaultRepo = "localhost:4000"
+
 	tests := []struct {
-		context                      string
-		expectedImageLoadingRequired bool
+		description string
+		cfg         *ContextConfig
+		defaultRepo StringOrUndefined
+		registry    *string
+		profile     string
+		expected    Cluster
 	}{
-		{context: "kind-other", expectedImageLoadingRequired: true},
-		{context: "kind@kind", expectedImageLoadingRequired: true},
-		{context: "k3d-k3s-default", expectedImageLoadingRequired: true},
-		{context: "docker-for-desktop", expectedImageLoadingRequired: false},
-		{context: "minikube", expectedImageLoadingRequired: false},
-		{context: "docker-desktop", expectedImageLoadingRequired: false},
-		{context: "anything-else", expectedImageLoadingRequired: false},
-		{context: "kind@blah", expectedImageLoadingRequired: false},
-		{context: "other-kind", expectedImageLoadingRequired: false},
-		{context: "not-k3d", expectedImageLoadingRequired: false},
+		{
+			description: "kind",
+			cfg:         &ContextConfig{Kubecontext: "kind-other"},
+			expected:    Cluster{Local: true, LoadImages: true, PushImages: false},
+		},
+		{
+			description: "kind with registry config",
+			cfg:         &ContextConfig{Kubecontext: "kind-other"},
+			registry:    &defaultRepo,
+			expected:    Cluster{Local: true, LoadImages: false, PushImages: true, DefaultRepo: NewStringOrUndefined(&defaultRepo)},
+		},
+		{
+			description: "kind with default-repo=localhost:4000",
+			cfg:         &ContextConfig{Kubecontext: "kind-other"},
+			defaultRepo: NewStringOrUndefined(&defaultRepo),
+			expected:    Cluster{Local: true, LoadImages: true, PushImages: false, DefaultRepo: NewStringOrUndefined(&defaultRepo)},
+		},
+		{
+			description: "kind with local-cluster=false",
+			cfg:         &ContextConfig{Kubecontext: "kind-other", LocalCluster: util.Ptr(false)},
+			expected:    Cluster{Local: false, LoadImages: false, PushImages: true},
+		},
+		{
+			description: "kind with kind-disable-load=true",
+			cfg:         &ContextConfig{Kubecontext: "kind-other", KindDisableLoad: util.Ptr(true)},
+			expected:    Cluster{Local: true, LoadImages: false, PushImages: true},
+		},
+		{
+			description: "kind with legacy name",
+			cfg:         &ContextConfig{Kubecontext: "kind@kind"},
+			expected:    Cluster{Local: true, LoadImages: true, PushImages: false},
+		},
+		{
+			description: "k3d",
+			cfg:         &ContextConfig{Kubecontext: "k3d-k3s-default"},
+			expected:    Cluster{Local: true, LoadImages: true, PushImages: false},
+		},
+		{
+			description: "k3d with local-cluster=false",
+			cfg:         &ContextConfig{Kubecontext: "k3d-k3s-default", LocalCluster: util.Ptr(false)},
+			expected:    Cluster{Local: false, LoadImages: false, PushImages: true},
+		},
+		{
+			description: "k3d with disable-load=true",
+			cfg:         &ContextConfig{Kubecontext: "k3d-k3s-default", K3dDisableLoad: util.Ptr(true)},
+			expected:    Cluster{Local: true, LoadImages: false, PushImages: true},
+		},
+		{
+			description: "docker-for-desktop",
+			cfg:         &ContextConfig{Kubecontext: "docker-for-desktop"},
+			expected:    Cluster{Local: true, LoadImages: false, PushImages: false},
+		},
+		{
+			description: "minikube",
+			cfg:         &ContextConfig{Kubecontext: "minikube"},
+			expected:    Cluster{Local: true, LoadImages: false, PushImages: false},
+		},
+		{
+			description: "docker-desktop",
+			cfg:         &ContextConfig{Kubecontext: "docker-desktop"},
+			expected:    Cluster{Local: true, LoadImages: false, PushImages: false},
+		},
+		{
+			description: "generic cluster with local-cluster=true",
+			cfg:         &ContextConfig{Kubecontext: "some-cluster", LocalCluster: util.Ptr(true)},
+			expected:    Cluster{Local: true, LoadImages: false, PushImages: false},
+		},
+		{
+			description: "generic cluster with minikube profile",
+			cfg:         &ContextConfig{Kubecontext: "some-cluster"},
+			profile:     "someprofile",
+			expected:    Cluster{Local: true, LoadImages: false, PushImages: false},
+		},
+		{
+			description: "generic cluster",
+			cfg:         &ContextConfig{Kubecontext: "anything-else"},
+			expected:    Cluster{Local: false, LoadImages: false, PushImages: true},
+		},
+		{
+			description: "not a legacy kind cluster",
+			cfg:         &ContextConfig{Kubecontext: "kind@blah"},
+			expected:    Cluster{Local: false, LoadImages: false, PushImages: true},
+		},
+		{
+			description: "not a kind cluster",
+			cfg:         &ContextConfig{Kubecontext: "other-kind"},
+			expected:    Cluster{Local: false, LoadImages: false, PushImages: true},
+		},
+		{
+			description: "not a k3d cluster",
+			cfg:         &ContextConfig{Kubecontext: "not-k3d"},
+			expected:    Cluster{Local: false, LoadImages: false, PushImages: true},
+		},
+		{
+			description: "generic cluster, default repo already defined",
+			cfg:         &ContextConfig{Kubecontext: "anything-else", DefaultRepo: "myrepo"},
+			defaultRepo: NewStringOrUndefined(&defaultRepo),
+			expected:    Cluster{Local: false, LoadImages: false, PushImages: true, DefaultRepo: NewStringOrUndefined(&defaultRepo)},
+		},
 	}
 	for _, test := range tests {
-		testutil.Run(t, "", func(t *testutil.T) {
-			imageLoadingRequired := IsImageLoadingRequired(test.context)
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			ctx := context.Background()
 
-			t.CheckDeepEqual(test.expectedImageLoadingRequired, imageLoadingRequired)
+			t.Override(&GetConfigForCurrentKubectx, func(string) (*ContextConfig, error) { return test.cfg, nil })
+			t.Override(&DiscoverLocalRegistry, func(context.Context, string) (*string, error) { return test.registry, nil })
+			t.Override(&cluster.GetClient, func() cluster.Client { return fakeClient{} })
+
+			cluster, _ := GetCluster(ctx, GetClusterOpts{
+				ConfigFile:      "dummyname",
+				DefaultRepo:     test.defaultRepo,
+				MinikubeProfile: test.profile,
+				DetectMinikube:  true,
+			})
+			t.CheckDeepEqual(test.expected, cluster)
+
+			cluster, _ = GetCluster(ctx, GetClusterOpts{
+				ConfigFile:      "dummyname",
+				DefaultRepo:     test.defaultRepo,
+				MinikubeProfile: test.profile,
+				DetectMinikube:  false,
+			})
+			t.CheckDeepEqual(test.expected, cluster)
 		})
 	}
 }
@@ -330,6 +443,56 @@ func TestIsKindCluster(t *testing.T) {
 			isKind := IsKindCluster(test.context)
 
 			t.CheckDeepEqual(test.expectedIsKind, isKind)
+		})
+	}
+}
+
+func TestIsMixedPlatformCluster(t *testing.T) {
+	type platform struct {
+		os   string
+		arch string
+	}
+	tests := []struct {
+		description string
+		nodes       []platform
+		expected    bool
+	}{
+		{
+			description: "no nodes",
+			expected:    false,
+		},
+		{
+			description: "single platform nodes",
+			nodes: []platform{
+				{os: "linux", arch: "amd64"},
+				{os: "linux", arch: "amd64"},
+			},
+			expected: false,
+		},
+		{
+			description: "mixed platform nodes",
+			nodes: []platform{
+				{os: "linux", arch: "amd64"},
+				{os: "linux", arch: "amd64"},
+				{os: "linux", arch: "arm64"},
+			},
+			expected: true,
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			nodes := &v1.NodeList{}
+			for _, n := range test.nodes {
+				nodes.Items = append(nodes.Items, v1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: uuid.New().String(),
+					},
+					Status: v1.NodeStatus{NodeInfo: v1.NodeSystemInfo{MachineID: uuid.New().String(), Architecture: n.arch, OperatingSystem: n.os}},
+				})
+			}
+			cl := fake.NewSimpleClientset(nodes)
+			t.Override(&kubeclient.Client, func(kubeContext string) (kubernetes.Interface, error) { return cl, nil })
+			t.CheckDeepEqual(test.expected, IsMixedPlatformCluster(context.Background(), ""))
 		})
 	}
 }
@@ -391,155 +554,6 @@ func TestK3dClusterName(t *testing.T) {
 	}
 }
 
-func TestIsSurveyPromptDisabled(t *testing.T) {
-	tests := []struct {
-		description string
-		cfg         *ContextConfig
-		readErr     error
-		expected    bool
-	}{
-		{
-			description: "config disable-prompt is nil returns false",
-			cfg:         &ContextConfig{},
-		},
-		{
-			description: "config disable-prompt is true",
-			cfg:         &ContextConfig{Survey: &SurveyConfig{DisablePrompt: util.BoolPtr(true)}},
-			expected:    true,
-		},
-		{
-			description: "config disable-prompt is false",
-			cfg:         &ContextConfig{Survey: &SurveyConfig{DisablePrompt: util.BoolPtr(false)}},
-		},
-		{
-			description: "disable prompt is nil",
-			cfg:         &ContextConfig{Survey: &SurveyConfig{}},
-		},
-		{
-			description: "config is nil",
-			cfg:         nil,
-		},
-		{
-			description: "config has err",
-			cfg:         nil,
-			readErr:     fmt.Errorf("error while reading"),
-		},
-	}
-	for _, test := range tests {
-		testutil.Run(t, test.description, func(t *testutil.T) {
-			t.Override(&GetConfigForCurrentKubectx, func(string) (*ContextConfig, error) { return test.cfg, test.readErr })
-			_, actual := isSurveyPromptDisabled("dummyconfig")
-			t.CheckDeepEqual(test.expected, actual)
-		})
-	}
-}
-
-func TestLessThan(t *testing.T) {
-	tests := []struct {
-		description string
-		date        string
-		duration    time.Duration
-		expected    bool
-	}{
-		{
-			description: "date is less than 10 days from 01/30/2019",
-			date:        "2019-01-22T13:04:05Z",
-			duration:    10 * 24 * time.Hour,
-			expected:    true,
-		},
-		{
-			description: "date is not less than 10 days from 01/30/2019",
-			date:        "2019-01-19T13:04:05Z",
-			duration:    10 * 24 * time.Hour,
-		},
-		{
-			description: "date is not right format",
-			date:        "01-19=20129",
-			expected:    false,
-		},
-	}
-	for _, test := range tests {
-		testutil.Run(t, test.description, func(t *testutil.T) {
-			t.Override(&current, func() time.Time {
-				t, _ := time.Parse(time.RFC3339, "2019-01-30T12:04:05Z")
-				return t
-			})
-			t.CheckDeepEqual(test.expected, lessThan(test.date, test.duration))
-		})
-	}
-}
-
-func TestShouldDisplayPrompt(t *testing.T) {
-	tests := []struct {
-		description string
-		cfg         *ContextConfig
-		expected    bool
-	}{
-		{
-			description: "should not display prompt when prompt is disabled",
-			cfg:         &ContextConfig{Survey: &SurveyConfig{DisablePrompt: util.BoolPtr(true)}},
-		},
-		{
-			description: "should not display prompt when last prompted is less than 2 weeks",
-			cfg: &ContextConfig{
-				Survey: &SurveyConfig{
-					DisablePrompt: util.BoolPtr(false),
-					LastPrompted:  "2019-01-22T00:00:00Z",
-				},
-			},
-		},
-		{
-			description: "should not display prompt when last taken in less than 3 months",
-			cfg: &ContextConfig{
-				Survey: &SurveyConfig{
-					DisablePrompt: util.BoolPtr(false),
-					LastTaken:     "2018-11-22T00:00:00Z",
-				},
-			},
-		},
-		{
-			description: "should display prompt when last prompted is before 2 weeks",
-			cfg: &ContextConfig{
-				Survey: &SurveyConfig{
-					DisablePrompt: util.BoolPtr(false),
-					LastPrompted:  "2019-01-10T00:00:00Z",
-				},
-			},
-			expected: true,
-		},
-		{
-			description: "should display prompt when last taken is before than 3 months ago",
-			cfg: &ContextConfig{
-				Survey: &SurveyConfig{
-					DisablePrompt: util.BoolPtr(false),
-					LastTaken:     "2017-11-10T00:00:00Z",
-				},
-			},
-			expected: true,
-		},
-		{
-			description: "should not display prompt when last taken is recent than 3 months ago",
-			cfg: &ContextConfig{
-				Survey: &SurveyConfig{
-					DisablePrompt: util.BoolPtr(false),
-					LastTaken:     "2019-01-10T00:00:00Z",
-					LastPrompted:  "2019-01-10T00:00:00Z",
-				},
-			},
-		},
-	}
-	for _, test := range tests {
-		testutil.Run(t, test.description, func(t *testutil.T) {
-			t.Override(&GetConfigForCurrentKubectx, func(string) (*ContextConfig, error) { return test.cfg, nil })
-			t.Override(&current, func() time.Time {
-				t, _ := time.Parse(time.RFC3339, "2019-01-30T12:04:05Z")
-				return t
-			})
-			t.CheckDeepEqual(test.expected, ShouldDisplayPrompt("dummyconfig"))
-		})
-	}
-}
-
 func TestGetDefaultRepo(t *testing.T) {
 	tests := []struct {
 		description  string
@@ -557,7 +571,7 @@ func TestGetDefaultRepo(t *testing.T) {
 		{
 			description:  "from cli",
 			cfg:          &ContextConfig{},
-			cliValue:     util.StringPtr("default/repo"),
+			cliValue:     util.Ptr("default/repo"),
 			expectedRepo: "default/repo",
 		},
 		{
@@ -569,7 +583,7 @@ func TestGetDefaultRepo(t *testing.T) {
 		{
 			description:  "cancel global config with cli",
 			cfg:          &ContextConfig{DefaultRepo: "global/repo"},
-			cliValue:     util.StringPtr(""),
+			cliValue:     util.Ptr(""),
 			expectedRepo: "",
 		},
 	}
@@ -578,9 +592,108 @@ func TestGetDefaultRepo(t *testing.T) {
 			t.Override(&GetConfigForCurrentKubectx, func(string) (*ContextConfig, error) { return test.cfg, nil })
 
 			defaultRepo, err := GetDefaultRepo("config", test.cliValue)
-
 			t.CheckNoError(err)
 			t.CheckDeepEqual(test.expectedRepo, defaultRepo)
+		})
+	}
+}
+
+func TestGetMultiLevelRepo(t *testing.T) {
+	tests := []struct {
+		description   string
+		cfg           *ContextConfig
+		expectedValue *bool
+		shouldErr     bool
+	}{
+		{
+			description:   "empty",
+			cfg:           &ContextConfig{},
+			expectedValue: (*bool)(nil),
+		},
+		{
+			description:   "from global config",
+			cfg:           &ContextConfig{MultiLevelRepo: util.Ptr(true)},
+			expectedValue: util.Ptr(true),
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			t.Override(&GetConfigForCurrentKubectx, func(string) (*ContextConfig, error) { return test.cfg, nil })
+
+			multiLevelRepo, err := GetMultiLevelRepo("config")
+
+			t.CheckNoError(err)
+			t.CheckDeepEqual(test.expectedValue, multiLevelRepo)
+		})
+	}
+}
+
+func TestDiscoverLocalRegistry(t *testing.T) {
+	var defaultRepo = "localhost:4000"
+
+	tests := []struct {
+		description        string
+		registryConfigData map[string]string
+		expectedRegistry   *string
+		expectedErr        string
+	}{
+		{
+			description: "no config map",
+		},
+		{
+			description:        "missing data",
+			registryConfigData: make(map[string]string),
+			expectedErr:        "invalid local-registry-hosting ConfigMap",
+		},
+		{
+			description: "invalid data",
+			registryConfigData: map[string]string{
+				"localRegistryHosting.v1": `invalid`,
+			},
+			expectedErr: "invalid local-registry-hosting ConfigMap",
+		},
+		{
+			description: "empty data",
+			registryConfigData: map[string]string{
+				"localRegistryHosting.v1": `{}`,
+			},
+		},
+		{
+			description: "valid data",
+			registryConfigData: map[string]string{
+				"localRegistryHosting.v1": `{host: "localhost:4000"}`,
+			},
+			expectedRegistry: &defaultRepo,
+		},
+	}
+
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			ctx := context.Background()
+			fakeKubeClient := fake.NewSimpleClientset()
+
+			if test.registryConfigData != nil {
+				configMap := &v1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "local-registry-hosting",
+					},
+					Data: test.registryConfigData,
+				}
+
+				_, err := fakeKubeClient.CoreV1().ConfigMaps("kube-public").Create(ctx, configMap, metav1.CreateOptions{})
+				t.CheckError(false, err)
+			}
+
+			t.Override(&kubeclient.Client, func(kubeContext string) (kubernetes.Interface, error) { return fakeKubeClient, nil })
+
+			registry, err := DiscoverLocalRegistry(ctx, "dummyname")
+			t.CheckDeepEqual(test.expectedRegistry, registry)
+
+			if test.expectedErr != "" {
+				t.CheckErrorContains(test.expectedErr, err)
+			} else {
+				t.CheckError(false, err)
+			}
 		})
 	}
 }
@@ -633,7 +746,7 @@ kubeContexts: []`,
 			})
 
 			// update the time
-			err := UpdateGlobalSurveyTaken(cfg)
+			err := UpdateHaTSSurveyTaken(cfg)
 			t.CheckNoError(err)
 
 			actualConfig, cfgErr := ReadConfigFile(cfg)
@@ -700,6 +813,190 @@ kubeContexts: []`,
 			t.CheckNoError(cfgErr)
 			// update time in expected cfg.
 			test.expectedCfg.Global.Survey.LastPrompted = testTime.Format(time.RFC3339)
+			t.CheckDeepEqual(test.expectedCfg, actualConfig)
+		})
+	}
+}
+
+func TestUpdateMsgDisplayed(t *testing.T) {
+	testTimeStr := "2021-01-01T00:00:00Z"
+	tests := []struct {
+		description string
+		cfg         string
+		expectedCfg *GlobalConfig
+	}{
+		{
+			description: "update global context when context is empty",
+			expectedCfg: &GlobalConfig{
+				Global: &ContextConfig{
+					UpdateCheckConfig: &UpdateConfig{LastPrompted: testTimeStr},
+				},
+				ContextConfigs: []*ContextConfig{},
+			},
+		},
+		{
+			description: "update global context when update config is not nil",
+			cfg: `
+global:
+  update-config:
+    last-prompted: "some date"
+kubeContexts: []`,
+			expectedCfg: &GlobalConfig{
+				Global: &ContextConfig{
+					UpdateCheckConfig: &UpdateConfig{LastPrompted: testTimeStr},
+				},
+				ContextConfigs: []*ContextConfig{},
+			},
+		},
+		{
+			description: "don't add LastPrompted if UpdateCheck is disabled",
+			cfg: `
+global:
+  update-check: false
+kubeContexts: []`,
+			expectedCfg: &GlobalConfig{
+				Global: &ContextConfig{
+					UpdateCheck: util.Ptr(false),
+				},
+				ContextConfigs: []*ContextConfig{},
+			},
+		},
+		{
+			description: "don't update LastPrompted if UpdateCheck is disabled",
+			cfg: `
+global:
+  update-check: false
+  update:
+    last-prompted: "some date"
+kubeContexts: []`,
+			expectedCfg: &GlobalConfig{
+				Global: &ContextConfig{
+					UpdateCheck: util.Ptr(false),
+					UpdateCheckConfig: &UpdateConfig{
+						LastPrompted: "some date"},
+				},
+				ContextConfigs: []*ContextConfig{},
+			},
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			configFile := t.TempFile("config", []byte(test.cfg))
+			t.Override(&ReadConfigFile, ReadConfigFileNoCache)
+			t.Override(&current, func() time.Time {
+				testTime, _ := time.Parse(time.RFC3339, testTimeStr)
+				return testTime
+			})
+
+			// update the cfg
+			err := UpdateMsgDisplayed(configFile)
+			t.CheckNoError(err)
+
+			cfg, cfgErr := ReadConfigFileNoCache(configFile)
+			t.CheckErrorAndDeepEqual(false, cfgErr, test.expectedCfg, cfg)
+		})
+	}
+}
+
+func TestShouldDisplayUpdateMsg(t *testing.T) {
+	todayStr := time.Now().Format(time.RFC3339)
+	yesterday := time.Now().AddDate(0, 0, -1).Format(time.RFC3339)
+	tests := []struct {
+		description string
+		cfg         *ContextConfig
+		expected    bool
+	}{
+		{
+			description: "should not display prompt when prompt is displayed in last 24 hours",
+			cfg: &ContextConfig{
+				UpdateCheckConfig: &UpdateConfig{LastPrompted: todayStr},
+			},
+		},
+		{
+			description: "should display prompt when last prompted is before 24 hours",
+			cfg: &ContextConfig{
+				UpdateCheckConfig: &UpdateConfig{LastPrompted: yesterday},
+			},
+			expected: true,
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			t.Override(&GetConfigForCurrentKubectx, func(string) (*ContextConfig, error) { return test.cfg, nil })
+			t.CheckDeepEqual(test.expected, ShouldDisplayUpdateMsg("dummyconfig"))
+		})
+	}
+}
+
+func TestUpdateUserSurveyTaken(t *testing.T) {
+	tests := []struct {
+		description string
+		cfg         string
+		id          string
+		expectedCfg *GlobalConfig
+	}{
+		{
+			description: "update global context when user survey is empty",
+			id:          "foo",
+			expectedCfg: &GlobalConfig{
+				Global: &ContextConfig{
+					Survey: &SurveyConfig{UserSurveys: []*UserSurvey{
+						{ID: "foo", Taken: util.Ptr(true)},
+					}}},
+				ContextConfigs: []*ContextConfig{},
+			},
+		},
+		{
+			description: "append user survey when not nil",
+			cfg: `
+global:
+  survey:
+    user-surveys:
+      - id: "foo1"
+        taken: true
+kubeContexts: []`,
+			id: "foo2",
+			expectedCfg: &GlobalConfig{
+				Global: &ContextConfig{
+					Survey: &SurveyConfig{
+						UserSurveys: []*UserSurvey{
+							{ID: "foo1", Taken: util.Ptr(true)},
+							{ID: "foo2", Taken: util.Ptr(true)},
+						}}},
+				ContextConfigs: []*ContextConfig{},
+			},
+		},
+		{
+			description: "update entry for a key in user survey",
+			cfg: `
+global:
+  survey:
+    user-surveys:
+      - id: "foo"
+        taken: false
+kubeContexts: []`,
+			id: "foo",
+			expectedCfg: &GlobalConfig{
+				Global: &ContextConfig{
+					Survey: &SurveyConfig{
+						UserSurveys: []*UserSurvey{
+							{ID: "foo", Taken: util.Ptr(true)},
+						}}},
+				ContextConfigs: []*ContextConfig{},
+			},
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			cfg := t.TempFile("config", []byte(test.cfg))
+			t.Override(&ReadConfigFile, ReadConfigFileNoCache)
+
+			// update the time
+			err := UpdateUserSurveyTaken(cfg, test.id)
+			t.CheckNoError(err)
+
+			actualConfig, cfgErr := ReadConfigFile(cfg)
+			t.CheckNoError(cfgErr)
 			t.CheckDeepEqual(test.expectedCfg, actualConfig)
 		})
 	}

@@ -26,12 +26,16 @@ import (
 	"github.com/sirupsen/logrus"
 	logrustest "github.com/sirupsen/logrus/hooks/test"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/tag"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/test"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/deploy"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/manifest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/tag"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/test"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 type mockBuilder struct {
@@ -39,7 +43,7 @@ type mockBuilder struct {
 	err bool
 }
 
-func (m *mockBuilder) Build(context.Context, io.Writer, tag.ImageTags, []*latest.Artifact) ([]build.Artifact, error) {
+func (m *mockBuilder) Build(context.Context, io.Writer, tag.ImageTags, platform.Resolver, []*latest.Artifact) ([]graph.Artifact, error) {
 	if m.err {
 		return nil, errors.New("Unable to build")
 	}
@@ -58,11 +62,30 @@ type mockTester struct {
 	err bool
 }
 
-func (m *mockTester) Test(context.Context, io.Writer, []build.Artifact) error {
+func (m *mockTester) Test(context.Context, io.Writer, []graph.Artifact) error {
 	if m.err {
 		return errors.New("Unable to test")
 	}
 	return nil
+}
+
+type mockRenderer struct {
+	test.Tester
+	err bool
+}
+
+func (m *mockRenderer) Render(context.Context, io.Writer, []graph.Artifact, bool) (manifest.ManifestListByConfig, error) {
+	if m.err {
+		return manifest.NewManifestListByConfig(), errors.New("Unable to render")
+	}
+	return manifest.NewManifestListByConfig(), nil
+}
+
+func (m *mockRenderer) ManifestDeps() ([]string, error) {
+	if m.err {
+		return nil, errors.New("Unable to get manifest dependencies")
+	}
+	return nil, nil
 }
 
 type mockDeployer struct {
@@ -70,14 +93,14 @@ type mockDeployer struct {
 	err bool
 }
 
-func (m *mockDeployer) Deploy(context.Context, io.Writer, []build.Artifact, []deploy.Labeller) *deploy.Result {
+func (m *mockDeployer) Deploy(context.Context, io.Writer, []graph.Artifact, manifest.ManifestListByConfig) error {
 	if m.err {
-		return deploy.NewDeployErrorResult(errors.New("Unable to deploy"))
+		return errors.New("Unable to deploy")
 	}
-	return deploy.NewDeploySuccessResult(nil)
+	return nil
 }
 
-func (m *mockDeployer) Cleanup(context.Context, io.Writer) error {
+func (m *mockDeployer) Cleanup(context.Context, io.Writer, bool, manifest.ManifestListByConfig) error {
 	if m.err {
 		return errors.New("Unable to cleanup")
 	}
@@ -94,7 +117,7 @@ func TestTimingsBuild(t *testing.T) {
 		{
 			description:  "build success",
 			shouldOutput: "",
-			shouldLog:    "Build complete in .+$",
+			shouldLog:    "Build completed in .+$",
 			shouldErr:    false,
 		},
 		{
@@ -105,13 +128,14 @@ func TestTimingsBuild(t *testing.T) {
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			hook := logrustest.NewGlobal()
+			hook := &logrustest.Hook{}
+			log.AddHook(hook)
 
 			b := &mockBuilder{err: test.shouldErr}
-			builder, _, _ := WithTimings(b, nil, nil, false)
+			builder, _, _, _ := WithTimings(b, nil, nil, nil, false)
 
 			var out bytes.Buffer
-			_, err := builder.Build(context.Background(), &out, nil, nil)
+			_, err := builder.Build(context.Background(), &out, nil, platform.Resolver{}, nil)
 
 			t.CheckError(test.shouldErr, err)
 			t.CheckMatches(test.shouldOutput, out.String())
@@ -130,7 +154,7 @@ func TestTimingsPrune(t *testing.T) {
 		{
 			description:  "test success",
 			shouldOutput: "(?m)^Pruning images...\n",
-			shouldLog:    "Image prune complete in .+$",
+			shouldLog:    "Image prune completed in .+$",
 			shouldErr:    false,
 		},
 		{
@@ -141,10 +165,11 @@ func TestTimingsPrune(t *testing.T) {
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			hook := logrustest.NewGlobal()
+			hook := &logrustest.Hook{}
+			log.AddHook(hook)
 
 			b := &mockBuilder{err: test.shouldErr}
-			builder, _, _ := WithTimings(b, nil, nil, false)
+			builder, _, _, _ := WithTimings(b, nil, nil, nil, false)
 
 			var out bytes.Buffer
 			err := builder.Prune(context.Background(), &out)
@@ -166,7 +191,7 @@ func TestTimingsTest(t *testing.T) {
 		{
 			description:  "test success",
 			shouldOutput: "",
-			shouldLog:    "Test complete in .+$",
+			shouldLog:    "Test completed in .+$",
 			shouldErr:    false,
 		},
 		{
@@ -177,10 +202,11 @@ func TestTimingsTest(t *testing.T) {
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			hook := logrustest.NewGlobal()
+			hook := &logrustest.Hook{}
+			log.AddHook(hook)
 
 			tt := &mockTester{err: test.shouldErr}
-			_, tester, _ := WithTimings(nil, tt, nil, false)
+			_, tester, _, _ := WithTimings(nil, tt, nil, nil, false)
 
 			var out bytes.Buffer
 			err := tester.Test(context.Background(), &out, nil)
@@ -188,6 +214,43 @@ func TestTimingsTest(t *testing.T) {
 			t.CheckError(test.shouldErr, err)
 			t.CheckMatches(test.shouldOutput, out.String())
 			t.CheckMatches(test.shouldLog, lastInfoEntry(hook))
+		})
+	}
+}
+
+func TestTimingsRender(t *testing.T) {
+	tests := []struct {
+		description  string
+		shouldOutput string
+		shouldLog    string
+		shouldErr    bool
+	}{
+		{
+			description:  "render success",
+			shouldOutput: "",
+			shouldLog:    "Render completed in .+$",
+			shouldErr:    false,
+		},
+		{
+			description:  "render failure",
+			shouldOutput: "",
+			shouldErr:    true,
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			hook := &logrustest.Hook{}
+			log.AddHook(hook)
+
+			r := &mockRenderer{err: test.shouldErr}
+			_, _, render, _ := WithTimings(nil, nil, r, nil, false)
+
+			var out bytes.Buffer
+			_, err := render.Render(context.Background(), &out, nil, false)
+
+			t.CheckError(test.shouldErr, err)
+			t.CheckMatches(test.shouldOutput, out.String())
+			t.CheckMatches(test.shouldLog, entryAtIndex(hook, 1))
 		})
 	}
 }
@@ -202,7 +265,7 @@ func TestTimingsDeploy(t *testing.T) {
 		{
 			description:  "prune success",
 			shouldOutput: "(?m)^Starting deploy...\n",
-			shouldLog:    "Deploy complete in .+$",
+			shouldLog:    "Deploy completed in .+$",
 			shouldErr:    false,
 		},
 		{
@@ -213,15 +276,16 @@ func TestTimingsDeploy(t *testing.T) {
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			hook := logrustest.NewGlobal()
+			hook := &logrustest.Hook{}
+			log.AddHook(hook)
 
 			d := &mockDeployer{err: test.shouldErr}
-			_, _, deployer := WithTimings(nil, nil, d, false)
+			_, _, _, deployer := WithTimings(nil, nil, nil, d, false)
 
 			var out bytes.Buffer
-			res := deployer.Deploy(context.Background(), &out, nil, nil)
+			err := deployer.Deploy(context.Background(), &out, nil, manifest.NewManifestListByConfig())
 
-			t.CheckError(test.shouldErr, res.GetError())
+			t.CheckError(test.shouldErr, err)
 			t.CheckMatches(test.shouldOutput, out.String())
 			t.CheckMatches(test.shouldLog, lastInfoEntry(hook))
 		})
@@ -238,7 +302,7 @@ func TestTimingsCleanup(t *testing.T) {
 		{
 			description:  "cleanup success",
 			shouldOutput: "(?m)^Cleaning up...\n",
-			shouldLog:    "Cleanup complete in .+$",
+			shouldLog:    "Cleanup completed in .+$",
 			shouldErr:    false,
 		},
 		{
@@ -249,13 +313,14 @@ func TestTimingsCleanup(t *testing.T) {
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			hook := logrustest.NewGlobal()
+			hook := &logrustest.Hook{}
+			log.AddHook(hook)
 
 			d := &mockDeployer{err: test.shouldErr}
-			_, _, deployer := WithTimings(nil, nil, d, false)
+			_, _, _, deployer := WithTimings(nil, nil, nil, d, false)
 
 			var out bytes.Buffer
-			err := deployer.Cleanup(context.Background(), &out)
+			err := deployer.Cleanup(context.Background(), &out, false, manifest.NewManifestListByConfig())
 
 			t.CheckError(test.shouldErr, err)
 			t.CheckMatches(test.shouldOutput, out.String())
@@ -269,6 +334,14 @@ func lastInfoEntry(hook *logrustest.Hook) string {
 		if entry.Level == logrus.InfoLevel {
 			return entry.Message
 		}
+	}
+	return ""
+}
+
+func entryAtIndex(hook *logrustest.Hook, i int) string {
+	e := hook.AllEntries()
+	if len(e) > i {
+		return e[i].Message
 	}
 	return ""
 }

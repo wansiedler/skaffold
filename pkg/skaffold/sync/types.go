@@ -18,31 +18,46 @@ package sync
 
 import (
 	"context"
+	"io"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubectl"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
+	pkgkubectl "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubectl"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/logger"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
 )
 
 type syncMap map[string][]string
 
 type Item struct {
-	Image  string
-	Copy   map[string][]string
-	Delete map[string][]string
+	Image    string
+	Artifact *latest.Artifact
+	Copy     map[string][]string
+	Delete   map[string][]string
 }
 
 type Syncer interface {
-	Sync(context.Context, *Item) error
+	Sync(context.Context, io.Writer, *Item) error
 }
 
-type podSyncer struct {
-	kubectl    *kubectl.CLI
-	namespaces []string
+type PodSyncer struct {
+	kubectl    *pkgkubectl.CLI
+	namespaces *[]string
+	formatter  logger.Formatter
 }
 
-func NewSyncer(runCtx *runcontext.RunContext) Syncer {
-	return &podSyncer{
-		kubectl:    kubectl.NewFromRunContext(runCtx),
-		namespaces: runCtx.Namespaces,
+func NewPodSyncer(cli *pkgkubectl.CLI, namespaces *[]string, formatter logger.Formatter) *PodSyncer {
+	return &PodSyncer{
+		kubectl:    cli,
+		namespaces: namespaces,
+		formatter:  formatter,
 	}
+}
+
+type NoopSyncer struct{}
+
+func (s *NoopSyncer) Sync(context.Context, io.Writer, *Item) error {
+	return nil
+}
+
+func (i *Item) HasChanges() bool {
+	return i != nil && (len(i.Copy) > 0 || len(i.Delete) > 0)
 }

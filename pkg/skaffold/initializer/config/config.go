@@ -16,7 +16,7 @@ limitations under the License.
 
 package config
 
-import "github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
+import "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
 
 // Config contains all the parameters for the initializer package
 type Config struct {
@@ -27,10 +27,12 @@ type Config struct {
 	CliKubernetesManifests   []string
 	SkipBuild                bool
 	SkipDeploy               bool
+	SkipUnreachableDirs      bool
 	Force                    bool
 	Analyze                  bool
 	EnableJibInit            bool // TODO: Remove this parameter
 	EnableJibGradleInit      bool
+	EnableKoInit             bool
 	EnableBuildpacksInit     bool
 	EnableNewInitFormat      bool
 	EnableManifestGeneration bool

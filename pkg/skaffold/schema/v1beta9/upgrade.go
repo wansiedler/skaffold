@@ -17,14 +17,14 @@ limitations under the License.
 package v1beta9
 
 import (
+	"context"
 	"regexp"
 	"strings"
 
-	"github.com/sirupsen/logrus"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/util"
-	next "github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/v1beta10"
-	pkgutil "github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
+	next "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/v1beta10"
+	pkgutil "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 const (
@@ -43,6 +43,7 @@ var (
 // 2. No removals
 // 3. Updates:
 //    - sync map becomes a list of sync rules
+
 func (c *SkaffoldConfig) Upgrade() (util.VersionedConfig, error) {
 	var newConfig next.SkaffoldConfig
 	pkgutil.CloneThroughJSON(c, &newConfig)
@@ -88,7 +89,7 @@ func convertSyncRules(artifacts []*Artifact) [][]*next.SyncRule {
 			case strings.Contains(src, "***"):
 				dest, strip := simplify(dest, strings.Split(src, "***")[0])
 				syncRule = &next.SyncRule{
-					Src:   strings.Replace(src, "***", "**", -1),
+					Src:   strings.ReplaceAll(src, "***", "**"),
 					Dest:  dest,
 					Strip: strip,
 				}
@@ -110,7 +111,7 @@ func convertSyncRules(artifacts []*Artifact) [][]*next.SyncRule {
 		a.Sync = nil
 	}
 	if len(incompatiblePatterns) > 0 {
-		logrus.Warnf(incompatibleSyncWarning, incompatiblePatterns)
+		log.Entry(context.TODO()).Warnf(incompatibleSyncWarning, incompatiblePatterns)
 	}
 	return newSync
 }

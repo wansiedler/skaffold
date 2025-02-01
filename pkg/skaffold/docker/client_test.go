@@ -17,18 +17,22 @@ limitations under the License.
 package docker
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/cluster"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestNewEnvClient(t *testing.T) {
 	tests := []struct {
 		description string
 		envs        map[string]string
+		command     *testutil.FakeCmd
 		shouldErr   bool
 	}{
 		{
@@ -45,10 +49,35 @@ func TestNewEnvClient(t *testing.T) {
 			},
 			shouldErr: true,
 		},
+		{
+			description: "ssh",
+			envs: map[string]string{
+				"DOCKER_HOST": "ssh://127.0.0.1",
+			},
+			shouldErr: false,
+		},
+		{
+			description: "DOCKER_HOST not set",
+			command:     testutil.CmdRunOut("docker context inspect --format {{.Endpoints.docker.Host}}", ""),
+			shouldErr:   false,
+		},
+		{
+			description: "DOCKER_HOST not set, output invalid host",
+			command:     testutil.CmdRunOut("docker context inspect --format {{.Endpoints.docker.Host}}", "invalid host"),
+			shouldErr:   true,
+		},
+		{
+			description: "DOCKER_HOST not set, ignore error",
+			command:     testutil.CmdRunOutErr("docker context inspect --format {{.Endpoints.docker.Host}}", "", fmt.Errorf("cannot get context")),
+			shouldErr:   false,
+		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			t.SetEnvs(test.envs)
+			if test.command != nil {
+				t.Override(&util.DefaultExecCommand, test.command)
+			}
 
 			env, _, err := newEnvAPIClient()
 
@@ -66,7 +95,7 @@ func TestNewMinikubeImageAPIClient(t *testing.T) {
 	}{
 		{
 			description: "correct client",
-			command: testutil.CmdRunOut("minikube docker-env --shell none", `DOCKER_TLS_VERIFY=1
+			command: testutil.CmdRunOut("minikube docker-env --shell none -p minikube", `DOCKER_TLS_VERIFY=1
 DOCKER_HOST=http://127.0.0.1:8080
 DOCKER_CERT_PATH=testdata
 DOCKER_API_VERSION=1.23`),
@@ -74,7 +103,7 @@ DOCKER_API_VERSION=1.23`),
 		},
 		{
 			description: "correct client - work around minikube #8615",
-			command: testutil.CmdRunOut("minikube docker-env --shell none", `DOCKER_TLS_VERIFY=1
+			command: testutil.CmdRunOut("minikube docker-env --shell none -p minikube", `DOCKER_TLS_VERIFY=1
 DOCKER_HOST=http://127.0.0.1:8080
 DOCKER_CERT_PATH=testdata
 DOCKER_API_VERSION=1.23
@@ -86,7 +115,7 @@ DOCKER_API_VERSION=1.23
 		},
 		{
 			description: "bad certificate",
-			command: testutil.CmdRunOut("minikube docker-env --shell none", `DOCKER_TLS_VERIFY=1
+			command: testutil.CmdRunOut("minikube docker-env --shell none -p minikube", `DOCKER_TLS_VERIFY=1
 DOCKER_HOST=http://127.0.0.1:8080
 DOCKER_CERT_PATH=bad/cert/path
 DOCKER_API_VERSION=1.23`),
@@ -94,21 +123,21 @@ DOCKER_API_VERSION=1.23`),
 		},
 		{
 			description: "missing host env, no error",
-			command: testutil.CmdRunOut("minikube docker-env --shell none", `DOCKER_TLS_VERIFY=1
+			command: testutil.CmdRunOut("minikube docker-env --shell none -p minikube", `DOCKER_TLS_VERIFY=1
 DOCKER_CERT_PATH=testdata
 DOCKER_API_VERSION=1.23`),
 			expectedEnv: []string{"DOCKER_API_VERSION=1.23", "DOCKER_CERT_PATH=testdata", "DOCKER_TLS_VERIFY=1"},
 		},
 		{
 			description: "missing version env, no error",
-			command: testutil.CmdRunOut("minikube docker-env --shell none", `DOCKER_TLS_VERIFY=1
+			command: testutil.CmdRunOut("minikube docker-env --shell none -p minikube", `DOCKER_TLS_VERIFY=1
 DOCKER_HOST=http://127.0.0.1:8080
 DOCKER_CERT_PATH=testdata`),
 			expectedEnv: []string{"DOCKER_CERT_PATH=testdata", "DOCKER_HOST=http://127.0.0.1:8080", "DOCKER_TLS_VERIFY=1"},
 		},
 		{
 			description: "bad url",
-			command: testutil.CmdRunOut("minikube docker-env --shell none", `DOCKER_TLS_VERIFY=1
+			command: testutil.CmdRunOut("minikube docker-env --shell none -p minikube", `DOCKER_TLS_VERIFY=1
 DOCKER_HOST=badurl
 DOCKER_CERT_PATH=testdata
 DOCKER_API_VERSION=1.23`),
@@ -116,7 +145,7 @@ DOCKER_API_VERSION=1.23`),
 		},
 		{
 			description: "allow `=` in urls",
-			command: testutil.CmdRunOut("minikube docker-env --shell none", `DOCKER_TLS_VERIFY=1
+			command: testutil.CmdRunOut("minikube docker-env --shell none -p minikube", `DOCKER_TLS_VERIFY=1
 DOCKER_HOST=http://127.0.0.1:8080?k=v
 DOCKER_CERT_PATH=testdata
 DOCKER_API_VERSION=1.23`),
@@ -124,32 +153,63 @@ DOCKER_API_VERSION=1.23`),
 		},
 		{
 			description: "bad env output",
-			command: testutil.CmdRunOut("minikube docker-env --shell none", `DOCKER_TLS_VERIFY=1
+			command: testutil.CmdRunOut("minikube docker-env --shell none -p minikube", `DOCKER_TLS_VERIFY=1
 DOCKER_HOST`),
 			shouldErr: true,
 		},
 		{
 			description: "command error",
-			command:     testutil.CmdRunOutErr("minikube docker-env --shell none", "", errors.New("fail")),
+			command:     testutil.CmdRunOutErr("minikube docker-env --shell none -p minikube", "", errors.New("fail")),
 			shouldErr:   true,
 		},
 		{
-			description: "minikube exit code 64 - fallback to host docker",
-			command:     testutil.CmdRunOutErr("minikube docker-env --shell none", "", fmt.Errorf("fail: %w", &badUsageErr{})),
+			description: "minikube exit code 64 (minikube < 1.13.0) - fallback to host docker",
+			command: testutil.CmdRunOutErr("minikube docker-env --shell none -p minikube", "", fmt.Errorf("fail: %w", &oldBadUsageErr{})).
+				AndRunOut("docker context inspect --format {{.Endpoints.docker.Host}}", ""),
+		},
+		{
+			description: "minikube exit code 51 (minikube >= 1.13.0) - fallback to host docker",
+			command: testutil.CmdRunOutErr("minikube docker-env --shell none -p minikube", "", fmt.Errorf("fail: %w", &driverConflictErr{})).
+				AndRunOut("docker context inspect --format {{.Endpoints.docker.Host}}", ""),
+		},
+		{
+			description: "minikube exit code 89 - fallback to host docker",
+			command: testutil.CmdRunOutErr("minikube docker-env --shell none -p minikube", "", fmt.Errorf("fail: %w", &exGuestUnavailable{})).
+				AndRunOut("docker context inspect --format {{.Endpoints.docker.Host}}", ""),
 		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			t.Override(&util.DefaultExecCommand, test.command)
+			t.Override(&cluster.GetClient, func() cluster.Client { return fakeMinikubeClient{} })
 
-			env, _, err := newMinikubeAPIClient("")
+			env, _, err := newMinikubeAPIClient(context.Background(), "minikube")
 
 			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expectedEnv, env)
 		})
 	}
 }
 
-type badUsageErr struct{}
+// minikube < 1.13.0 returns exit code 64 (BadUsage) on `minikube docker-env` with driver `none`
+type oldBadUsageErr struct{}
 
-func (e *badUsageErr) Error() string { return "bad usage" }
-func (e *badUsageErr) ExitCode() int { return 64 }
+func (e *oldBadUsageErr) Error() string { return "bad usage" }
+func (e *oldBadUsageErr) ExitCode() int { return 64 }
+
+// minikube >= 1.13.0 returns exit code 51 (ExDriverConfict) on `minikube docker-env` with driver `none`
+type driverConflictErr struct{}
+
+func (e *driverConflictErr) Error() string { return "driver conflict" }
+func (e *driverConflictErr) ExitCode() int { return 51 }
+
+type exGuestUnavailable struct{}
+
+func (e *exGuestUnavailable) Error() string { return "minikube not available" }
+func (e *exGuestUnavailable) ExitCode() int { return 89 }
+
+type fakeMinikubeClient struct{}
+
+func (fakeMinikubeClient) IsMinikube(context.Context, string) bool { return false }
+func (fakeMinikubeClient) MinikubeExec(ctx context.Context, arg ...string) (*exec.Cmd, error) {
+	return exec.Command("minikube", arg...), nil
+}

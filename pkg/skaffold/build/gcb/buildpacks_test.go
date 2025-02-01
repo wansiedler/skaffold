@@ -17,13 +17,15 @@ limitations under the License.
 package gcb
 
 import (
+	"context"
 	"testing"
 
-	cloudbuild "google.golang.org/api/cloudbuild/v1"
+	"google.golang.org/api/cloudbuild/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestBuildpackBuildSpec(t *testing.T) {
@@ -73,6 +75,51 @@ func TestBuildpackBuildSpec(t *testing.T) {
 				Steps: []*cloudbuild.BuildStep{{
 					Name: "pack/image",
 					Args: []string{"pack", "build", "img", "--builder", "otherbuilder", "--run-image", "run/image"},
+				}},
+				Images: []string{"img"},
+			},
+		},
+		{
+			description: "custom build image",
+			artifact: &latest.BuildpackArtifact{
+				Builder:           "img2",
+				RunImage:          "run/image",
+				ProjectDescriptor: "project.toml",
+			},
+			expected: cloudbuild.Build{
+				Steps: []*cloudbuild.BuildStep{{
+					Name: "pack/image",
+					Args: []string{"pack", "build", "img", "--builder", "img2:tag", "--run-image", "run/image"},
+				}},
+				Images: []string{"img"},
+			},
+		},
+		{
+			description: "custom run image",
+			artifact: &latest.BuildpackArtifact{
+				Builder:           "otherbuilder",
+				RunImage:          "img3",
+				ProjectDescriptor: "project.toml",
+			},
+			expected: cloudbuild.Build{
+				Steps: []*cloudbuild.BuildStep{{
+					Name: "pack/image",
+					Args: []string{"pack", "build", "img", "--builder", "otherbuilder", "--run-image", "img3:tag"},
+				}},
+				Images: []string{"img"},
+			},
+		},
+		{
+			description: "custom build and run image",
+			artifact: &latest.BuildpackArtifact{
+				Builder:           "img2",
+				RunImage:          "img3",
+				ProjectDescriptor: "project.toml",
+			},
+			expected: cloudbuild.Build{
+				Steps: []*cloudbuild.BuildStep{{
+					Name: "pack/image",
+					Args: []string{"pack", "build", "img", "--builder", "img2:tag", "--run-image", "img3:tag"},
 				}},
 				Images: []string{"img"},
 			},
@@ -135,15 +182,20 @@ func TestBuildpackBuildSpec(t *testing.T) {
 			t.Override(&util.OSEnviron, func() []string { return []string{"BAR=bar"} })
 
 			artifact := &latest.Artifact{
+				ImageName: "img",
 				ArtifactType: latest.ArtifactType{
 					BuildpackArtifact: test.artifact,
 				},
+				Dependencies: []*latest.ArtifactDependency{{ImageName: "img2", Alias: "img2"}, {ImageName: "img3", Alias: "img3"}},
 			}
-
-			builder := newBuilder(latest.GoogleCloudBuild{
+			store := mockArtifactStore{
+				"img2": "img2:tag",
+				"img3": "img3:tag",
+			}
+			builder := NewBuilder(&mockBuilderContext{artifactStore: store}, &latest.GoogleCloudBuild{
 				PackImage: "pack/image",
 			})
-			buildSpec, err := builder.buildSpec(artifact, "img", "bucket", "object")
+			buildSpec, err := builder.buildSpec(context.Background(), artifact, "img", platform.Matcher{}, "bucket", "object")
 			t.CheckError(test.shouldErr, err)
 
 			if !test.shouldErr {

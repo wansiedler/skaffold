@@ -17,17 +17,19 @@ limitations under the License.
 package analyze
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/karrick/godirwalk"
-	"github.com/sirupsen/logrus"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/initializer/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/initializer/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/initializer/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/initializer/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 // analyzer is following the visitor pattern. It is called on every file
@@ -35,17 +37,27 @@ import (
 // It can manage state and react to walking events assuming a breadth first search.
 type analyzer interface {
 	enterDir(dir string)
-	analyzeFile(file string) error
+	analyzeFile(ctx context.Context, file string) error
 	exitDir(dir string)
 }
 
 type ProjectAnalysis struct {
-	configAnalyzer    *skaffoldConfigAnalyzer
-	kubeAnalyzer      *kubeAnalyzer
-	kustomizeAnalyzer *kustomizeAnalyzer
-	helmAnalyzer      *helmAnalyzer
-	builderAnalyzer   *builderAnalyzer
-	maxFileSize       int64
+	configAnalyzer      *skaffoldConfigAnalyzer
+	kubeAnalyzer        *kubeAnalyzer
+	kustomizeAnalyzer   *kustomizeAnalyzer
+	helmAnalyzer        *helmAnalyzer
+	builderAnalyzer     *builderAnalyzer
+	maxFileSize         int64
+	skipUnreachableDirs bool
+}
+
+type HelmChartInfo struct {
+	chartPaths    map[string][]string
+	buildersFound []build.InitBuilder
+}
+
+func (h *HelmChartInfo) Charts() map[string][]string {
+	return h.chartPaths
 }
 
 func (a *ProjectAnalysis) Builders() []build.InitBuilder {
@@ -64,8 +76,15 @@ func (a *ProjectAnalysis) KustomizeBases() []string {
 	return a.kustomizeAnalyzer.bases
 }
 
-func (a *ProjectAnalysis) ChartPaths() []string {
-	return a.helmAnalyzer.chartPaths
+func (a *ProjectAnalysis) HelmChartInfo() HelmChartInfo {
+	return HelmChartInfo{
+		chartPaths:    a.helmAnalyzer.chartDirs,
+		buildersFound: a.Builders(),
+	}
+}
+
+func (a *ProjectAnalysis) ChartPaths() map[string][]string {
+	return a.helmAnalyzer.chartDirs
 }
 
 func (a *ProjectAnalysis) analyzers() []analyzer {
@@ -83,11 +102,12 @@ func NewAnalyzer(c config.Config) *ProjectAnalysis {
 	return &ProjectAnalysis{
 		kubeAnalyzer:      &kubeAnalyzer{},
 		kustomizeAnalyzer: &kustomizeAnalyzer{},
-		helmAnalyzer:      &helmAnalyzer{},
+		helmAnalyzer:      &helmAnalyzer{chartDirs: map[string][]string{}},
 		builderAnalyzer: &builderAnalyzer{
 			findBuilders:         !c.SkipBuild,
 			enableJibInit:        c.EnableJibInit,
 			enableJibGradleInit:  c.EnableJibGradleInit,
+			enableKoInit:         c.EnableKoInit,
 			enableBuildpacksInit: c.EnableBuildpacksInit,
 			buildpacksBuilder:    c.BuildpacksBuilder,
 		},
@@ -96,7 +116,8 @@ func NewAnalyzer(c config.Config) *ProjectAnalysis {
 			analyzeMode:  c.Analyze,
 			targetConfig: c.Opts.ConfigurationFile,
 		},
-		maxFileSize: c.MaxFileSize,
+		maxFileSize:         c.MaxFileSize,
+		skipUnreachableDirs: c.SkipUnreachableDirs,
 	}
 }
 
@@ -109,6 +130,10 @@ func (a *ProjectAnalysis) Analyze(dir string) error {
 	}
 
 	dirents, err := godirwalk.ReadDirents(dir, nil)
+	if errors.Is(err, os.ErrPermission) && a.skipUnreachableDirs {
+		log.Entry(context.TODO()).Debugf("skipping directory %s due to permissions error", dir)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -147,15 +172,15 @@ func (a *ProjectAnalysis) Analyze(dir string) error {
 				continue
 			}
 			if stat.Size() > a.maxFileSize {
-				logrus.Debugf("skipping %s as it is larger (%d) than max allowed size %d", filePath, stat.Size(), a.maxFileSize)
+				log.Entry(context.TODO()).Debugf("skipping %s as it is larger (%d) than max allowed size %d", filePath, stat.Size(), a.maxFileSize)
 				continue
 			}
 		}
 
-		// to make skaffold.yaml more portable across OS-es we should always generate / based filePaths
+		// to make skaffold.yaml more portable across OS-es we should always generate /-delimited filePaths
 		filePath = strings.ReplaceAll(filePath, string(os.PathSeparator), "/")
 		for _, analyzer := range a.analyzers() {
-			if err := analyzer.analyzeFile(filePath); err != nil {
+			if err := analyzer.analyzeFile(context.Background(), filePath); err != nil {
 				return err
 			}
 		}

@@ -17,17 +17,20 @@ limitations under the License.
 package gcb
 
 import (
+	"context"
 	"fmt"
 
-	cloudbuild "google.golang.org/api/cloudbuild/v1"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"google.golang.org/api/cloudbuild/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/misc"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/misc"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
 )
 
-func (b *Builder) buildSpec(artifact *latest.Artifact, tag, bucket, object string) (cloudbuild.Build, error) {
+func (b *Builder) buildSpec(ctx context.Context, artifact *latest.Artifact, tag string, platforms platform.Matcher, bucket, object string) (cloudbuild.Build, error) {
 	// Artifact specific build spec
-	buildSpec, err := b.buildSpecForArtifact(artifact, tag)
+	buildSpec, err := b.buildSpecForArtifact(ctx, artifact, tag, platforms)
 	if err != nil {
 		return buildSpec, err
 	}
@@ -45,27 +48,37 @@ func (b *Builder) buildSpec(artifact *latest.Artifact, tag, bucket, object strin
 	}
 	buildSpec.Options.DiskSizeGb = b.DiskSizeGb
 	buildSpec.Options.MachineType = b.MachineType
-	buildSpec.Options.WorkerPool = b.WorkerPool
+	if b.WorkerPool != "" {
+		buildSpec.Options.Pool = &cloudbuild.PoolOption{Name: b.WorkerPool}
+	}
 	buildSpec.Options.Logging = b.Logging
 	buildSpec.Options.LogStreamingOption = b.LogStreamingOption
 	buildSpec.Timeout = b.Timeout
+	buildSpec.ServiceAccount = b.ServiceAccount
 
 	return buildSpec, nil
 }
 
-func (b *Builder) buildSpecForArtifact(a *latest.Artifact, tag string) (cloudbuild.Build, error) {
+func (b *Builder) buildSpecForArtifact(ctx context.Context, a *latest.Artifact, tag string, platforms platform.Matcher) (cloudbuild.Build, error) {
 	switch {
 	case a.KanikoArtifact != nil:
-		return b.kanikoBuildSpec(a.KanikoArtifact, tag)
+		return b.kanikoBuildSpec(a, tag)
 
 	case a.DockerArtifact != nil:
-		return b.dockerBuildSpec(a.DockerArtifact, tag)
+		return b.dockerBuildSpec(a, tag, platforms)
 
 	case a.JibArtifact != nil:
-		return b.jibBuildSpec(a, tag)
+		return b.jibBuildSpec(ctx, a, tag, platforms)
 
 	case a.BuildpackArtifact != nil:
-		return b.buildpackBuildSpec(a.BuildpackArtifact, tag)
+		// TODO: Buildpacks only supports building for platform linux/amd64. See https://github.com/GoogleCloudPlatform/buildpacks/issues/112
+		if platforms.IsNotEmpty() && platforms.Intersect(platform.Matcher{Platforms: []v1.Platform{{OS: "linux", Architecture: "amd64"}}}).IsEmpty() {
+			return cloudbuild.Build{}, fmt.Errorf("buildpacks builder doesn't support building for platforms %s. Cannot build gcb artifact:\n%s", platforms.String(), misc.FormatArtifact(a))
+		}
+		return b.buildpackBuildSpec(a.BuildpackArtifact, tag, a.Dependencies)
+
+	case a.KoArtifact != nil:
+		return b.koBuildSpec(ctx, a, tag, platforms)
 
 	default:
 		return cloudbuild.Build{}, fmt.Errorf("unexpected type %q for gcb artifact:\n%s", misc.ArtifactType(a), misc.FormatArtifact(a))

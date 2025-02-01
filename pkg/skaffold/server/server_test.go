@@ -23,9 +23,9 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/proto"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/proto/v1"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 var (
@@ -37,8 +37,8 @@ func TestServerStartup(t *testing.T) {
 	// start up servers
 	shutdown, err := Initialize(config.SkaffoldOptions{
 		EnableRPC:   true,
-		RPCPort:     rpcAddr,
-		RPCHTTPPort: httpAddr,
+		RPCPort:     config.NewIntOrUndefined(&rpcAddr),
+		RPCHTTPPort: config.NewIntOrUndefined(&httpAddr),
 	})
 	defer shutdown()
 	testutil.CheckError(t, false, err)

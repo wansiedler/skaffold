@@ -21,37 +21,54 @@ import (
 	"context"
 	"errors"
 	"io"
-	"io/ioutil"
+	"os"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/cmd/skaffold/app/flags"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/cmd/skaffold/app/flags"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner/runcontext"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 type mockRunner struct {
 	runner.Runner
 }
 
-func (r *mockRunner) BuildAndTest(ctx context.Context, out io.Writer, artifacts []*latest.Artifact) ([]build.Artifact, error) {
+func (r *mockRunner) Build(ctx context.Context, out io.Writer, artifacts []*latest.Artifact) ([]graph.Artifact, error) {
 	out.Write([]byte("Build Completed"))
-	return []build.Artifact{{
-		ImageName: "gcr.io/skaffold/example",
-		Tag:       "test",
-	}}, nil
+	graphArtifacts := make([]graph.Artifact, len(artifacts))
+	for i, a := range artifacts {
+		graphArtifacts[i] = graph.Artifact{
+			ImageName:   a.ImageName,
+			Tag:         "test",
+			RuntimeType: a.RuntimeType,
+		}
+	}
+	return graphArtifacts, nil
 }
 
 func (r *mockRunner) Stop() error {
 	return nil
 }
 
-func TestTagFlag(t *testing.T) {
-	mockCreateRunner := func(config.SkaffoldOptions) (runner.Runner, *latest.SkaffoldConfig, error) {
-		return &mockRunner{}, &latest.SkaffoldConfig{}, nil
+func newMockCreateRunner(artifacts []*latest.Artifact) func(context.Context, io.Writer, config.SkaffoldOptions) (runner.Runner, []util.VersionedConfig, *runcontext.RunContext, error) {
+	return func(context.Context, io.Writer, config.SkaffoldOptions) (runner.Runner, []util.VersionedConfig, *runcontext.RunContext, error) {
+		return &mockRunner{}, []util.VersionedConfig{&latest.SkaffoldConfig{
+			Pipeline: latest.Pipeline{
+				Build: latest.BuildConfig{
+					Artifacts: artifacts,
+				},
+			},
+		}}, nil, nil
 	}
+}
+
+func TestTagFlag(t *testing.T) {
+	mockCreateRunner := newMockCreateRunner([]*latest.Artifact{{ImageName: "gcr.io/skaffold/example"}})
 
 	testutil.Run(t, "override tag with argument", func(t *testutil.T) {
 		t.Override(&quietFlag, true)
@@ -68,9 +85,7 @@ func TestTagFlag(t *testing.T) {
 }
 
 func TestQuietFlag(t *testing.T) {
-	mockCreateRunner := func(config.SkaffoldOptions) (runner.Runner, *latest.SkaffoldConfig, error) {
-		return &mockRunner{}, &latest.SkaffoldConfig{}, nil
-	}
+	mockCreateRunner := newMockCreateRunner([]*latest.Artifact{{ImageName: "gcr.io/skaffold/example"}})
 
 	tests := []struct {
 		description    string
@@ -114,9 +129,7 @@ func TestQuietFlag(t *testing.T) {
 }
 
 func TestFileOutputFlag(t *testing.T) {
-	mockCreateRunner := func(config.SkaffoldOptions) (runner.Runner, *latest.SkaffoldConfig, error) {
-		return &mockRunner{}, &latest.SkaffoldConfig{}, nil
-	}
+	mockCreateRunner := newMockCreateRunner([]*latest.Artifact{{ImageName: "gcr.io/skaffold/example"}})
 
 	tests := []struct {
 		description         string
@@ -169,7 +182,7 @@ func TestFileOutputFlag(t *testing.T) {
 			t.CheckDeepEqual(string(test.expectedOutput), output.String())
 
 			// Check that file contents are correct
-			fileContent, err := ioutil.ReadFile(test.filename)
+			fileContent, err := os.ReadFile(test.filename)
 			t.CheckNoError(err)
 			t.CheckDeepEqual(string(test.expectedFileContent), string(fileContent))
 		})
@@ -177,16 +190,14 @@ func TestFileOutputFlag(t *testing.T) {
 }
 
 func TestRunBuild(t *testing.T) {
-	errRunner := func(config.SkaffoldOptions) (runner.Runner, *latest.SkaffoldConfig, error) {
-		return nil, nil, errors.New("some error")
+	errRunner := func(context.Context, io.Writer, config.SkaffoldOptions) (runner.Runner, []util.VersionedConfig, *runcontext.RunContext, error) {
+		return nil, nil, nil, errors.New("some error")
 	}
-	mockCreateRunner := func(config.SkaffoldOptions) (runner.Runner, *latest.SkaffoldConfig, error) {
-		return &mockRunner{}, &latest.SkaffoldConfig{}, nil
-	}
+	mockCreateRunner := newMockCreateRunner([]*latest.Artifact{{ImageName: "gcr.io/skaffold/example"}})
 
 	tests := []struct {
 		description string
-		mock        func(config.SkaffoldOptions) (runner.Runner, *latest.SkaffoldConfig, error)
+		mock        func(context.Context, io.Writer, config.SkaffoldOptions) (runner.Runner, []util.VersionedConfig, *runcontext.RunContext, error)
 		shouldErr   bool
 	}{
 		{
@@ -204,9 +215,28 @@ func TestRunBuild(t *testing.T) {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			t.Override(&createRunner, test.mock)
 
-			err := doBuild(context.Background(), ioutil.Discard)
+			err := doBuild(context.Background(), io.Discard)
 
 			t.CheckError(test.shouldErr, err)
 		})
 	}
+}
+
+func TestRuntimeType(t *testing.T) {
+	mockCreateRunner := newMockCreateRunner([]*latest.Artifact{{
+		ImageName:   "gcr.io/skaffold/example",
+		RuntimeType: "go",
+	}})
+
+	testutil.Run(t, "set runtime type on artifact", func(t *testutil.T) {
+		t.Override(&quietFlag, true)
+		t.Override(&createRunner, mockCreateRunner)
+
+		var output bytes.Buffer
+
+		err := doBuild(context.Background(), &output)
+
+		t.CheckNoError(err)
+		t.CheckDeepEqual(string([]byte(`{"builds":[{"imageName":"gcr.io/skaffold/example","tag":"test","runtimeType":"go"}]}`)), output.String())
+	})
 }

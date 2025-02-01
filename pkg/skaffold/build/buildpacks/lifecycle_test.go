@@ -18,59 +18,87 @@ package buildpacks
 
 import (
 	"errors"
+	"fmt"
 	"testing"
+
+	lifecycle "github.com/buildpacks/lifecycle/cmd"
+	pack "github.com/buildpacks/pack/pkg/client"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
-func TestRewriteLifecycleStatusCode(t *testing.T) {
-	tests := []struct {
-		errText  string
-		expected string
-	}{
-		{"blah blah", "blah blah"},
-		{"failed with status code: 0", "lifecycle failed with status code 0"},
-		{"failed with status code: 1", "lifecycle failed with status code 1"},
-		{"failed with status code: 2", "lifecycle failed with status code 2"},
-		{"failed with status code: 3", "lifecycle reported invalid arguments"}, //CodeInvalidArgs
-		{"failed with status code: 4", "lifecycle failed with status code 4"},
-		{"failed with status code: 5", "lifecycle failed with status code 5"},
-		{"failed with status code: 6", "buildpacks could not determine application type"}, //CodeFailedDetect
-		{"failed with status code: 7", "buildpacks failed to build"},                      //CodeFailedBuild
-		{"failed with status code: 8", "lifecycle failed with status code 8"},
-		{"failed with status code: 9", "lifecycle failed with status code 9"},
-		{"failed with status code: 10", "buildpacks failed to save image"}, //CodeFailedSave
-		{"failed with status code: 11", "incompatible lifecycle version"},  //CodeIncompatible
-	}
-	for _, test := range tests {
-		result := rewriteLifecycleStatusCode(errors.New(test.errText))
-		if result.Error() != test.expected {
-			t.Errorf("got %q, wanted %q", result.Error(), test.expected)
-		}
-	}
-}
-
-func TestMapLifecycleStatusCode(t *testing.T) {
+func TestLifecycleStatusCode(t *testing.T) {
 	tests := []struct {
 		code     int
 		expected string
 	}{
+		{lifecycle.CodeForFailed, "buildpacks lifecycle failed"},
+		{lifecycle.CodeForInvalidArgs, "lifecycle reported invalid arguments"},
+		{lifecycle.CodeForIncompatiblePlatformAPI, "incompatible version of Platform API"},
+		{lifecycle.CodeForIncompatibleBuildpackAPI, "incompatible version of Buildpacks API"},
+
 		{0, "lifecycle failed with status code 0"},
-		{1, "lifecycle failed with status code 1"},
-		{2, "lifecycle failed with status code 2"},
-		{3, "lifecycle reported invalid arguments"}, // CodeInvalidArgs
-		{4, "lifecycle failed with status code 4"},
-		{5, "lifecycle failed with status code 5"},
-		{6, "buildpacks could not determine application type"}, // CodeFailedDetect
-		{7, "buildpacks failed to build"},                      // CodeFailedBuild
-		{8, "lifecycle failed with status code 8"},
-		{9, "lifecycle failed with status code 9"},
-		{10, "buildpacks failed to save image"}, //CodeFailedSave
-		{11, "incompatible lifecycle version"},  // CodeIncompatible
-		{12, "lifecycle failed with status code 12"},
 	}
 	for _, test := range tests {
 		result := mapLifecycleStatusCode(test.code)
 		if result != test.expected {
 			t.Errorf("code %d: got %q, wanted %q", test.code, result, test.expected)
 		}
+	}
+	for _, test := range tests {
+		errText := fmt.Sprintf("failed with status code: %d", test.code)
+		result := rewriteLifecycleStatusCode(errors.New(errText))
+		if result.Error() != test.expected {
+			t.Errorf("got %q, wanted %q", result.Error(), test.expected)
+		}
+	}
+}
+
+func TestContainerConfig(t *testing.T) {
+	tests := []struct {
+		description string
+		volumes     []*latest.BuildpackVolume
+		shouldErr   bool
+		expected    pack.ContainerConfig
+	}{
+		{
+			description: "single volume with no options",
+			volumes:     []*latest.BuildpackVolume{{Host: "/foo", Target: "/bar"}},
+			expected:    pack.ContainerConfig{Volumes: []string{"/foo:/bar"}},
+		},
+		{
+			description: "single volume with  options",
+			volumes:     []*latest.BuildpackVolume{{Host: "/foo", Target: "/bar", Options: "rw"}},
+			expected:    pack.ContainerConfig{Volumes: []string{"/foo:/bar:rw"}},
+		},
+		{
+			description: "multiple volumes",
+			volumes: []*latest.BuildpackVolume{
+				{Host: "/foo", Target: "/bar", Options: "rw"},
+				{Host: "/bat", Target: "/baz", Options: "ro"},
+			},
+			expected: pack.ContainerConfig{Volumes: []string{"/foo:/bar:rw", "/bat:/baz:ro"}},
+		},
+		{
+			description: "missing host is skipped",
+			volumes:     []*latest.BuildpackVolume{{Host: "", Target: "/bar"}},
+			shouldErr:   true,
+		},
+		{
+			description: "missing target is skipped",
+			volumes:     []*latest.BuildpackVolume{{Host: "/foo", Target: ""}},
+			shouldErr:   true,
+		},
+	}
+
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			artifact := latest.BuildpackArtifact{
+				Volumes: test.volumes,
+			}
+			result, err := containerConfig(&artifact)
+			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expected, result)
+		})
 	}
 }

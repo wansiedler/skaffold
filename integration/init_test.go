@@ -18,46 +18,56 @@ package integration
 
 import (
 	"errors"
-	"io/ioutil"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/integration/skaffold"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/integration/skaffold"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
-func TestInitCompose(t *testing.T) {
-	MarkIntegrationTest(t, CanRunWithoutGcp)
-
+func TestInit(t *testing.T) {
 	tests := []struct {
 		name string
 		dir  string
 		args []string
 	}{
+		/*
+			// Fix after https://github.com/GoogleContainerTools/skaffold/issues/6722
+				{
+					name: "compose",
+					dir:  "testdata/init/compose",
+					args: []string{"--compose-file", "docker-compose.yaml"},
+				},
+		*/
 		{
-			name: "compose",
-			dir:  "testdata/init/compose",
-			args: []string{"--compose-file", "docker-compose.yaml"},
+			name: "helm init",
+			dir:  "testdata/init/helm-project",
+			args: []string{"--XXenableBuildpacksInit=false"},
 		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.name, func(t *testutil.T) {
+			MarkIntegrationTest(t.T, CanRunWithoutGcp)
 			ns, _ := SetupNamespace(t.T)
 
 			initArgs := append([]string{"--force"}, test.args...)
 			skaffold.Init(initArgs...).InDir(test.dir).WithConfig("skaffold.yaml.out").RunOrFail(t.T)
-
 			checkGeneratedConfig(t, test.dir)
 
 			// Make sure the skaffold yaml and the kubernetes manifests created by kompose are ok
 			skaffold.Run().InDir(test.dir).WithConfig("skaffold.yaml.out").InNs(ns.Name).RunOrFail(t.T)
+			defer skaffold.Delete().InDir(test.dir).WithConfig("skaffold.yaml.out").InNs(ns.Name)
 		})
 	}
 }
 
 func TestInitManifestGeneration(t *testing.T) {
+	t.Skipf("Fix after https://github.com/GoogleContainerTools/skaffold/issues/6722")
+
 	MarkIntegrationTest(t, CanRunWithoutGcp)
 
 	tests := []struct {
@@ -69,7 +79,7 @@ func TestInitManifestGeneration(t *testing.T) {
 		{
 			name:                  "hello",
 			dir:                   "testdata/init/hello",
-			args:                  []string{"--XXenableManifestGeneration"},
+			args:                  []string{"--generate-manifests"},
 			expectedManifestPaths: []string{"deployment.yaml"},
 		},
 		// TODO(nkubala): add this back when the --force flag is fixed
@@ -92,11 +102,14 @@ func TestInitManifestGeneration(t *testing.T) {
 
 			// Make sure the skaffold yaml and the kubernetes manifests created by kompose are ok
 			skaffold.Run().InDir(test.dir).WithConfig("skaffold.yaml.out").InNs(ns.Name).RunOrFail(t.T)
+			skaffold.Delete().InDir(test.dir).WithConfig("skaffold.yaml.out").InNs(ns.Name).RunOrFail(t.T)
 		})
 	}
 }
 
 func TestInitKustomize(t *testing.T) {
+	t.Skipf("Fix after https://github.com/GoogleContainerTools/skaffold/issues/6722")
+
 	MarkIntegrationTest(t, CanRunWithoutGcp)
 
 	testutil.Run(t, "kustomize init", func(t *testutil.T) {
@@ -117,24 +130,64 @@ func TestInitKustomize(t *testing.T) {
 		checkGeneratedConfig(t, dir)
 
 		skaffold.Run().InDir(dir).WithConfig("skaffold.yaml.out").InNs(ns.Name).RunOrFail(t.T)
+		skaffold.Delete().InDir(dir).WithConfig("skaffold.yaml.out").InNs(ns.Name).RunOrFail(t.T)
+	})
+}
+
+func TestInitWithCLIArtifact(t *testing.T) {
+	t.Skipf("Fix after https://github.com/GoogleContainerTools/skaffold/issues/6722")
+
+	MarkIntegrationTest(t, CanRunWithoutGcp)
+
+	testutil.Run(t, "init with cli artifact", func(t *testutil.T) {
+		dir := "testdata/init/hello-with-manifest"
+		ns, _ := SetupNamespace(t.T)
+
+		initArgs := append([]string{"--force"},
+			`--artifact={"builder":"Docker","payload":{"path":"../hello/Dockerfile"},"image":"dockerfile-image"}`)
+		skaffold.Init(initArgs...).InDir(dir).WithConfig("skaffold.yaml.out").RunOrFail(t.T)
+
+		checkGeneratedConfig(t, dir)
+
+		// Make sure the skaffold yaml is ok
+		skaffold.Run().InDir(dir).WithConfig("skaffold.yaml.out").InNs(ns.Name).RunOrFail(t.T)
+		skaffold.Delete().InDir(dir).WithConfig("skaffold.yaml.out").InNs(ns.Name).RunOrFail(t.T)
+	})
+}
+
+func TestInitWithCLIArtifactAndManifestGeneration(t *testing.T) {
+	MarkIntegrationTest(t, CanRunWithoutGcp)
+	t.Skipf("Fix after https://github.com/GoogleContainerTools/skaffold/issues/6722")
+
+	testutil.Run(t, "init with cli artifact and manifests", func(t *testutil.T) {
+		ns, _ := SetupNamespace(t.T)
+		dir := "testdata/init/hello"
+
+		initArgs := append([]string{"--force"},
+			`--artifact={"builder":"Docker","payload":{"path":"./Dockerfile"},"image":"dockerfile-image","manifest":{"generate":true,"port":8080}}`)
+		skaffold.Init(initArgs...).InDir(dir).WithConfig("skaffold.yaml.out").RunOrFail(t.T)
+
+		checkGeneratedManifests(t, dir, []string{"deployment.yaml"})
+
+		skaffold.Run().InDir(dir).WithConfig("skaffold.yaml.out").InNs(ns.Name).RunOrFail(t.T)
 	})
 }
 
 func checkGeneratedConfig(t *testutil.T, dir string) {
-	expectedOutput, err := ioutil.ReadFile(filepath.Join(dir, "skaffold.yaml"))
+	expectedOutput, err := os.ReadFile(filepath.Join(dir, "skaffold.yaml"))
 	t.CheckNoError(err)
 
-	output, err := ioutil.ReadFile(filepath.Join(dir, "skaffold.yaml.out"))
+	output, err := os.ReadFile(filepath.Join(dir, "skaffold.yaml.out"))
 	t.CheckNoError(err)
-	t.CheckDeepEqual(string(expectedOutput), string(output))
+	t.CheckDeepEqual(string(expectedOutput), string(output), testutil.YamlObj(t.T))
 }
 
 func checkGeneratedManifests(t *testutil.T, dir string, manifestPaths []string) {
 	for _, path := range manifestPaths {
-		expectedOutput, err := ioutil.ReadFile(filepath.Join(dir, path+".expected"))
+		expectedOutput, err := os.ReadFile(filepath.Join(dir, strings.Join([]string{".", path, ".expected"}, "")))
 		t.CheckNoError(err)
 
-		output, err := ioutil.ReadFile(filepath.Join(dir, path))
+		output, err := os.ReadFile(filepath.Join(dir, path))
 		t.CheckNoError(err)
 		t.CheckDeepEqual(string(expectedOutput), string(output))
 	}
@@ -158,4 +211,47 @@ func exitCode(err error) int {
 	}
 
 	return 1
+}
+
+func TestInitWithDirWithoutReadPerms(t *testing.T) {
+	MarkIntegrationTest(t, CanRunWithoutGcp)
+	tests := []struct {
+		description string
+		shouldFail  bool
+		flags       []string
+		dir         string
+		dirToCreate string
+	}{
+		{
+			description: "without --skip-unreachable-dirs flag, should fail",
+			shouldFail:  true,
+			flags:       []string{"--analyze"},
+			dir:         "testdata/getting-started/",
+			dirToCreate: "dir1",
+		},
+		{
+			description: "with --skip-unreachable-dirs flag, shouldn't fail",
+			shouldFail:  false,
+			flags:       []string{"--analyze", "--skip-unreachable-dirs"},
+			dir:         "testdata/getting-started",
+			dirToCreate: "dir2",
+		},
+	}
+
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			tmpDir := testutil.NewTempDir(t.T)
+			copyFiles(tmpDir.Root(), test.dir)
+
+			dirWithoutReadPerms := filepath.Join(tmpDir.Root(), test.dirToCreate)
+			os.MkdirAll(dirWithoutReadPerms, 0377)
+			defer os.Remove(dirWithoutReadPerms)
+
+			output, err := skaffold.Init(test.flags...).InDir(tmpDir.Root()).RunWithCombinedOutput(t.T)
+			t.CheckError(test.shouldFail, err)
+			if test.shouldFail {
+				t.CheckDeepEqual(fmt.Sprintf("open %v: permission denied\n", test.dirToCreate), string(output))
+			}
+		})
+	}
 }

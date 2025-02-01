@@ -17,8 +17,10 @@ limitations under the License.
 package testutil
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,8 +31,10 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"k8s.io/apimachinery/pkg/watch"
 	fake_testing "k8s.io/client-go/testing"
+	"sigs.k8s.io/kustomize/kyaml/yaml"
 )
 
 type T struct {
@@ -60,6 +64,13 @@ func (t *T) CheckMatches(pattern, actual string) {
 	}
 }
 
+func CheckRegex(t *testing.T, pattern, actual string) {
+	r, _ := regexp.Compile(pattern)
+	if r.MatchString(actual) {
+		t.Errorf("expected output %s to match regex: %s", actual, pattern)
+	}
+}
+
 func (t *T) CheckContains(expected, actual string) {
 	t.Helper()
 	CheckContains(t.T, expected, actual)
@@ -82,7 +93,7 @@ func (t *T) CheckNotNil(actual interface{}) {
 }
 
 func isNil(actual interface{}) bool {
-	return actual == nil || (reflect.ValueOf(actual).Kind() == reflect.Ptr && reflect.ValueOf(actual).IsNil())
+	return actual == nil || (reflect.ValueOf(actual).Kind() == reflect.Ptr && reflect.ValueOf(actual).IsNil()) || (reflect.ValueOf(actual).Kind() == reflect.Func && reflect.ValueOf(actual).IsZero())
 }
 
 func (t *T) CheckTrue(actual bool) {
@@ -135,9 +146,43 @@ func (t *T) CheckErrorAndDeepEqual(shouldErr bool, err error, expected, actual i
 	CheckErrorAndDeepEqual(t.T, shouldErr, err, expected, actual, opts...)
 }
 
+func (t *T) CheckErrorAndExitCode(expectedCode int, err error) {
+	t.Helper()
+	CheckErrorAndExitCode(t.T, expectedCode, err)
+}
+
 func (t *T) CheckError(shouldErr bool, err error) {
 	t.Helper()
 	CheckError(t.T, shouldErr, err)
+}
+
+// CheckElementsMatch validates that two given slices contain the same elements
+// while disregarding their order.
+// Elements of both slices have to be comparable by '=='
+func (t *T) CheckElementsMatch(expected, actual interface{}) {
+	t.Helper()
+	CheckElementsMatch(t.T, expected, actual)
+}
+
+// CheckMapsMatch validates that two given maps contain the same key value pairs.
+func (t *T) CheckMapsMatch(expected, actual interface{}) {
+	t.Helper()
+	CheckMapsMatch(t.T, expected, actual)
+}
+
+// CheckErrorAndFailNow checks that the provided error complies with whether or not we expect an error
+// and fails the test execution immediately if it does not.
+// Useful for testing functions which return (obj interface{}, e error) and subsequent checks operate on `obj`
+// assuming that it is not nil.
+func (t *T) CheckErrorAndFailNow(shouldErr bool, err error) {
+	t.Helper()
+	CheckErrorAndFailNow(t.T, shouldErr, err)
+}
+
+// CheckFileExistAndContent checks if the given file path exists and the content is expected.
+func (t *T) CheckFileExistAndContent(filePath string, expectedContent []byte) {
+	t.Helper()
+	CheckFileExistAndContent(t.T, filePath, expectedContent)
 }
 
 // CheckErrorContains checks that an error is not nil and contains
@@ -220,12 +265,18 @@ func Run(t *testing.T, name string, f func(t *T)) {
 	})
 }
 
-////
-
 func CheckContains(t *testing.T, expected, actual string) {
 	t.Helper()
 	if !strings.Contains(actual, expected) {
 		t.Errorf("expected output %s not found in output: %s", expected, actual)
+		return
+	}
+}
+
+func CheckNotContains(t *testing.T, excluded, actual string) {
+	t.Helper()
+	if strings.Contains(actual, excluded) {
+		t.Errorf("excluded output %s found in output: %s", excluded, actual)
 		return
 	}
 }
@@ -235,6 +286,68 @@ func CheckDeepEqual(t *testing.T, expected, actual interface{}, opts ...cmp.Opti
 	if diff := cmp.Diff(actual, expected, opts...); diff != "" {
 		t.Errorf("%T differ (-got, +want): %s", expected, diff)
 		return
+	}
+}
+
+// CheckMapsMatch validates that two given maps contain the same key-value pairs
+func CheckMapsMatch(t *testing.T, expected, actual interface{}) {
+	t.Helper()
+	s1 := reflect.ValueOf(expected)
+	if s1.Kind() != reflect.Map {
+		t.Fatalf("`expected` is not a map")
+	}
+	s2 := reflect.ValueOf(actual)
+	if s2.Kind() != reflect.Map {
+		t.Fatalf("`actual` is not a map")
+	}
+	if s1.Len() != s2.Len() {
+		t.Fatalf("length of the maps differ: Expected %d, but was %d", s1.Len(), s2.Len())
+	}
+
+	var err string
+	for _, key := range s1.MapKeys() {
+		val1 := s1.MapIndex(key)
+		val2 := s2.MapIndex(key)
+		if diff := cmp.Diff(val2.Interface(), val1.Interface()); diff != "" {
+			err += fmt.Sprintf("%T differ for key %q (-got, +want): %s\n", val1.Interface(), key, diff)
+		}
+	}
+	if err != "" {
+		t.Error(err)
+	}
+}
+
+// CheckElementsMatch validates that two given slices contain the same elements
+// while disregarding their order.
+// Elements of both slices have to be comparable by '=='
+func CheckElementsMatch(t *testing.T, expected, actual interface{}) {
+	t.Helper()
+	expectedSlc, err := interfaceSlice(expected)
+	if err != nil {
+		t.Fatalf("error converting `expected` to interface slice: %s", err)
+	}
+	actualSlc, err := interfaceSlice(actual)
+	if err != nil {
+		t.Fatalf("error converting `actual` to interface slice: %s", err)
+	}
+	expectedLen := len(expectedSlc)
+	actualLen := len(actualSlc)
+
+	if expectedLen != actualLen {
+		t.Fatalf("length of the slices differ: Expected %d, but was %d", expectedLen, actualLen)
+	}
+
+	wmap := make(map[interface{}]int)
+	for _, elem := range expectedSlc {
+		wmap[elem]++
+	}
+	for _, elem := range actualSlc {
+		wmap[elem]--
+	}
+	for _, v := range wmap {
+		if v != 0 {
+			t.Fatalf("elements are missing (negative integers) or excess (positive integers): %#v", wmap)
+		}
 	}
 }
 
@@ -257,6 +370,42 @@ func CheckError(t *testing.T, shouldErr bool, err error) {
 	}
 }
 
+func CheckErrorAndExitCode(t *testing.T, expectedCode int, err error) {
+	t.Helper()
+	CheckErrorAndFailNow(t, true, err)
+	type exitCoder interface {
+		ExitCode() int
+	}
+	var ec exitCoder
+	if ok := errors.As(err, &ec); !ok {
+		t.Errorf("error %q did not contain an exit code", err)
+	} else if ec.ExitCode() != expectedCode {
+		t.Errorf("expected exit code %d from err, but was %d", expectedCode, ec.ExitCode())
+	}
+}
+
+func CheckErrorAndFailNow(t *testing.T, shouldErr bool, err error) {
+	t.Helper()
+	if err := checkErr(shouldErr, err); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func CheckFileExistAndContent(t *testing.T, path string, expectedContent []byte) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("abs path %v: %v", path, err)
+	}
+	if _, err := os.Stat(absPath); os.IsNotExist(err) {
+		t.Fatalf("file %v does not exist", path)
+	}
+	actualContent, err := os.ReadFile(absPath)
+	if err != nil {
+		t.Error(err)
+	}
+	CheckDeepEqual(t, expectedContent, actualContent)
+}
+
 func EnsureTestPanicked(t *testing.T) {
 	if recover() == nil {
 		t.Errorf("should have panicked")
@@ -271,6 +420,18 @@ func checkErr(shouldErr bool, err error) error {
 		return fmt.Errorf("unexpected error: %s", err)
 	}
 	return nil
+}
+
+func interfaceSlice(slice interface{}) ([]interface{}, error) {
+	s := reflect.ValueOf(slice)
+	if s.Kind() != reflect.Slice {
+		return nil, fmt.Errorf("not a slice")
+	}
+	ret := make([]interface{}, s.Len())
+	for i := 0; i < s.Len(); i++ {
+		ret[i] = s.Index(i).Interface()
+	}
+	return ret, nil
 }
 
 // ServeFile serves a file with http. Returns the url to the file and a teardown
@@ -292,11 +453,11 @@ func override(t *testing.T, dest, tmp interface{}) (err error) {
 		if r := recover(); r != nil {
 			switch x := r.(type) {
 			case string:
-				t.Errorf("unable to override value: %s", x)
+				t.Fatalf("unable to override value: %s", x)
 			case error:
-				t.Errorf("unable to override value: %w", x)
+				t.Fatalf("unable to override value: %s", x)
 			default:
-				t.Error("unable to override value")
+				t.Fatal("unable to override value")
 			}
 		}
 	}()
@@ -326,4 +487,29 @@ func SetupFakeWatcher(w watch.Interface) func(a fake_testing.Action) (handled bo
 	return func(a fake_testing.Action) (handled bool, ret watch.Interface, err error) {
 		return true, w, nil
 	}
+}
+
+// YamlObj used in cmp.Diff, cmp.Equal to convert input from yaml string to map[string]any before comparison
+func YamlObj(t *testing.T) cmp.Option {
+	t.Helper()
+	return cmpopts.AcyclicTransformer("cmpYaml", func(in string) []map[string]any {
+		var out []map[string]any
+		decoder := yaml.NewDecoder(bytes.NewReader([]byte(in)))
+		for {
+			var cur map[string]interface{}
+
+			err := decoder.Decode(&cur)
+
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			if err != nil {
+				t.Fatalf("failed to decode string to yaml obj : %v\n", err)
+			}
+
+			out = append(out, cur)
+		}
+		return out
+	})
 }

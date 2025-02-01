@@ -18,24 +18,17 @@ package main
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/sirupsen/logrus"
 
-	hackschema "github.com/GoogleContainerTools/skaffold/hack/versions/pkg/schema"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema"
+	"github.com/GoogleContainerTools/skaffold/v2/hack/versions/pkg/schema"
 )
 
+// TODO(yuwenma): Print the latest released versions for both v1 and v2.
 // Print the latest version released.
 func main() {
 	logrus.SetLevel(logrus.ErrorLevel)
 
-	current, latestIsReleased := hackschema.GetLatestVersion()
-
-	if latestIsReleased {
-		fmt.Println(current)
-	} else {
-		prev := strings.TrimPrefix(schema.SchemaVersions[len(schema.SchemaVersions)-2].APIVersion, "skaffold/")
-		fmt.Println(prev)
-	}
+	lastReleasedVersion := schema.GetLastReleasedVersion()
+	fmt.Println(lastReleasedVersion)
 }

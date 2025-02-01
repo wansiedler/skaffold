@@ -25,8 +25,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/warnings"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/warnings"
 )
 
 const unknown = "unknown"
@@ -117,5 +117,5 @@ func (c *CLI) Version(ctx context.Context) ClientVersion {
 
 func (c *CLI) getVersion(ctx context.Context) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "kubectl", "version", "--client", "-ojson")
-	return util.RunCmdOut(cmd)
+	return util.RunCmdOut(ctx, cmd)
 }

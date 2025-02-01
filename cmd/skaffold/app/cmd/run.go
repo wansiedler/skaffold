@@ -23,9 +23,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/GoogleContainerTools/skaffold/cmd/skaffold/app/tips"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/cmd/skaffold/app/tips"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/manifest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
 )
 
 // NewCmdRun describes the CLI command to run a pipeline.
@@ -36,21 +37,40 @@ func NewCmdRun() *cobra.Command {
 		WithExample("Build, test, deploy and tail the logs", "run --tail").
 		WithExample("Run with a given profile", "run -p <profile>").
 		WithCommonFlags().
+		WithHouseKeepingMessages().
 		NoArgs(doRun)
 }
 
 func doRun(ctx context.Context, out io.Writer) error {
-	return withRunner(ctx, func(r runner.Runner, config *latest.SkaffoldConfig) error {
-		bRes, err := r.BuildAndTest(ctx, out, config.Build.Artifacts)
+	return withRunner(ctx, out, func(r runner.Runner, configs []util.VersionedConfig) error {
+		bRes, err := r.Build(ctx, out, targetArtifacts(opts, configs))
 		if err != nil {
 			return fmt.Errorf("failed to build: %w", err)
 		}
 
-		err = r.DeployAndLog(ctx, out, bRes)
-		if err == nil {
-			tips.PrintForRun(out, opts)
+		if !opts.SkipTests {
+			err = r.Test(ctx, out, bRes)
+			if err != nil {
+				return fmt.Errorf("failed to test: %w", err)
+			}
 		}
 
-		return err
+		// Render
+		manifestList, err := r.Render(ctx, out, bRes, false)
+		if err != nil {
+			return fmt.Errorf("rendering manifests: %w", err)
+		}
+		if opts.RenderOnly {
+			return manifest.Write(manifestList.String(), opts.RenderOutput, out)
+		}
+
+		err = r.DeployAndLog(ctx, out, bRes, manifestList)
+		if err != nil {
+			return fmt.Errorf("failed to deploy: %w", err)
+		}
+
+		tips.PrintForRun(out, opts)
+
+		return nil
 	})
 }

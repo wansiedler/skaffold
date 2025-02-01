@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema"
 )
 
 var OutputType string
@@ -64,7 +64,11 @@ func printPlain(out io.Writer) error {
 func versions() []string {
 	var versions []string
 
-	for _, version := range schema.SchemaVersions {
+	for _, version := range schema.SchemaVersionsV1 {
+		versions = append(versions, version.APIVersion)
+	}
+
+	for _, version := range schema.SchemaVersionsV2 {
 		versions = append(versions, version.APIVersion)
 	}
 

@@ -1,20 +1,22 @@
 ### Example: Jib Sync
 
+[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://ssh.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/GoogleContainerTools/skaffold&cloudshell_open_in_editor=README.md&cloudshell_workspace=examples/jib-sync)
+
 [Jib](https://github.com/GoogleContainerTools/jib) is one of the supported builders in Skaffold. Jib
 has special sync support using the `auto` configuration.
 
 ## Running the example
 
-Run the maven or gradle version of the example with port forwarding on.
+Run the maven or gradle version of the example.
 
 #### Gradle
 ```
-$ skaffold dev -f skaffold-gradle.yaml --port-forward
+$ skaffold dev -f skaffold-gradle.yaml
 ```
 
 #### Maven
 ```
-$ skaffold dev -f skaffold-maven.yaml --port-forward
+$ skaffold dev -f skaffold-maven.yaml
 ```
 
 You can now see sync in action:
@@ -58,38 +60,27 @@ build:
     context: .
     jib: {}
     sync: 
-      auto: {}
+      auto: true
 ```
 
 This example is designed around the functionality available in [Spring Boot Developer Tools](https://docs.spring.io/spring-boot/docs/current/reference/html/using-spring-boot.html#using-boot-devtools) for developing against running applications.
 
-Some additional steps in your java build are required for this to work:
-- Sync requires `tar` on the running container to copy files over. The default base image that Jib uses `gcr.io/distroless/java` does not include `tar` or any utilities. During development you must use a base image that includes `tar`, in this example we use the `debug` flavor of distroless: `gcr.io/distroless/java:debug` 
+Some additional steps are required for this to work:
+- Sync requires `tar` on the running container to copy files over. The default base image that Jib uses `gcr.io/distroless/java` does not include `tar` or any utilities. During development, you must use a base image that includes `tar`, in this example we use the `debug` flavor of distroless: `gcr.io/distroless/java:debug` 
 
-`maven`
-```xml
-<plugin>
-  <groupId>com.google.cloud.tools</groupId>
-  <artifactId>jib-maven-plugin</artifactId>
-  <version>${jib.maven-plugin-version}</version>
-  <configuration>
-    ...
-    <from>
-      <image>gcr.io/distroless/java:debug</image>
-    </from>
-  </configuration>
-</plugin>
+This can be done directly in the artifact configuration by overriding the `fromImage` property.
+
+```yaml
+build:
+  artifacts:
+  - image: skaffold-example
+    context: .
+    jib: 
+      fromImage: gcr.io/distroless/java:debug
+    sync: 
+      auto: true
 ```
 
-`gradle`
-```groovy
-jib {
-  ...
-  from {
-    image = "gcr.io/distroless/java:debug"
-  }
-}
-```
 
 - You must include the `spring-boot-devtools` dependency at the `compile/implementation` scope, which is contrary to the configuration outlined in the [official docs](https://docs.spring.io/spring-boot/docs/current/reference/html/using-spring-boot.html#using-boot-devtools). Because jib is unaware of any special spring only configuration in your builds, we recommend using profiles to turn on or off devtools support in your jib container builds.
 
@@ -97,7 +88,7 @@ jib {
 ```xml
 <profiles>
   <profile>
-    <id>sync<id>
+    <id>sync</id>
     <dependencies>
       <dependency>
         <groupId>org.springframework.boot</groupId>
@@ -132,7 +123,7 @@ build:
       args: 
       - -Psync
     sync: 
-      auto: {}
+      auto: true
 ```
 
 You can also take advantage of [skaffold profiles](https://skaffold.dev/docs/environment/profiles/) to control when to activate sync on your project.
@@ -152,7 +143,7 @@ profiles:
     # we want to activate sync on our skaffold artifact
     path: /build/artifacts/0/sync
     value:
-      - auto: {}
+      - auto: true
   - op: add
     # we activate the sync profile in our java builds
     path: /build/artifacts/0/jib/args

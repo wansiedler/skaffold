@@ -25,10 +25,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/filemon"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/filemon"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestGetSyncMapFromSystem(t *testing.T) {
@@ -120,7 +120,7 @@ func TestGetSyncMapFromSystem(t *testing.T) {
 				test.stdout,
 			))
 
-			results, err := getSyncMapFromSystem(&exec.Cmd{Args: []string{"ignored"}})
+			results, err := getSyncMapFromSystem(context.Background(), &exec.Cmd{Args: []string{"ignored"}})
 
 			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expected, results)
 		})
@@ -300,5 +300,5 @@ func getFileTime(file string, t *testing.T) time.Time {
 
 // for paths that contain "\", they must be escaped in json strings
 func escapeBackslashes(path string) string {
-	return strings.Replace(path, `\`, `\\`, -1)
+	return strings.ReplaceAll(path, `\`, `\\`)
 }

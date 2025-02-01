@@ -17,11 +17,12 @@ limitations under the License.
 package schema
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 type gitClient interface {
@@ -73,7 +74,7 @@ func (g *git) diffWithBaseline(path string) ([]byte, error) {
 
 func (g *git) run(args ...string) ([]byte, error) {
 	cmd := exec.Command(g.path, args...)
-	out, err := util.RunCmdOut(cmd)
+	out, err := util.RunCmdOut(context.Background(), cmd)
 	if err != nil {
 		return nil, fmt.Errorf("failed running %v: %s\n%s", cmd.Args, err, string(out))
 	}

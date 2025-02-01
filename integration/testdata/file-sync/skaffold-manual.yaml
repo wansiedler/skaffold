@@ -1,4 +1,4 @@
-apiVersion: skaffold/v1beta13
+apiVersion: skaffold/v4beta12
 kind: Config
 build:
   tagPolicy:
@@ -10,7 +10,6 @@ build:
       manual:
       - src: '**/foo*'
         dest: /
-deploy:
- kubectl:
-   manifests:
+manifests:
+  rawYaml:
    - pod.yaml

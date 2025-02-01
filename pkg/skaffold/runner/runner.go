@@ -18,79 +18,79 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"io"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/cache"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/tag"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/filemon"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubectl"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/sync"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/test"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/cache"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/deploy"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/deploy/label"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/filemon"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/manifest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/render/renderer"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner/runcontext"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/test"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/verify"
 )
 
-const (
-	remoteDigestSource = "remote"
-	noneDigestSource   = "none"
-)
+// ErrorConfigurationChanged is a special error that's returned when the skaffold configuration was changed.
+var ErrorConfigurationChanged = errors.New("configuration changed")
 
 // Runner is responsible for running the skaffold build, test and deploy config.
 type Runner interface {
-	Dev(context.Context, io.Writer, []*latest.Artifact) error
+	Apply(context.Context, io.Writer) error
 	ApplyDefaultRepo(tag string) (string, error)
-	BuildAndTest(context.Context, io.Writer, []*latest.Artifact) ([]build.Artifact, error)
-	DeployAndLog(context.Context, io.Writer, []build.Artifact) error
-	GeneratePipeline(context.Context, io.Writer, *latest.SkaffoldConfig, []string, string) error
-	Render(context.Context, io.Writer, []build.Artifact, bool, string) error
-	Cleanup(context.Context, io.Writer) error
-	Prune(context.Context, io.Writer) error
-	HasDeployed() bool
+	Build(context.Context, io.Writer, []*latest.Artifact) ([]graph.Artifact, error)
+	Cleanup(context.Context, io.Writer, bool, manifest.ManifestListByConfig, string) error
+	Dev(context.Context, io.Writer, []*latest.Artifact) error
+	// Deploy and DeployAndLog: Do they need the `graph.Artifact` and could use render output.
+	Deploy(context.Context, io.Writer, []graph.Artifact, manifest.ManifestListByConfig) error
+	DeployAndLog(context.Context, io.Writer, []graph.Artifact, manifest.ManifestListByConfig) error
+	GeneratePipeline(context.Context, io.Writer, []util.VersionedConfig, []string, string) error
 	HasBuilt() bool
+	DeployManifests() manifest.ManifestListByConfig
+	Prune(context.Context, io.Writer) error
+
+	Render(ctx context.Context, out io.Writer, builds []graph.Artifact, offline bool) (manifest.ManifestListByConfig, error)
+	Test(context.Context, io.Writer, []graph.Artifact) error
+	Verify(context.Context, io.Writer, []graph.Artifact) error
+	VerifyAndLog(context.Context, io.Writer, []graph.Artifact) error
+
+	Exec(context.Context, io.Writer, []graph.Artifact, string) error
 }
 
 // SkaffoldRunner is responsible for running the skaffold build, test and deploy config.
 type SkaffoldRunner struct {
-	builder  build.Builder
-	deployer deploy.Deployer
-	tester   test.Tester
-	tagger   tag.Tagger
-	syncer   sync.Syncer
-	monitor  filemon.Monitor
-	listener Listener
+	Builder
+	Pruner
+	tester test.Tester
 
-	kubectlCLI      *kubectl.CLI
-	cache           cache.Cache
-	changeSet       changeSet
-	runCtx          *runcontext.RunContext
-	labellers       []deploy.Labeller
-	defaultLabeller *deploy.DefaultLabeller
-	builds          []build.Artifact
+	renderer      renderer.Renderer
+	deployer      deploy.Deployer
+	verifier      verify.Verifier
+	actionsRunner ActionsRunner
+	monitor       filemon.Monitor
+	listener      Listener
 
-	// podSelector is used to determine relevant pods for logging and portForwarding
-	podSelector *kubernetes.ImageList
+	cache              cache.Cache
+	changeSet          ChangeSet
+	runCtx             *runcontext.RunContext
+	labeller           *label.DefaultLabeller
+	artifactStore      build.ArtifactStore
+	sourceDependencies graph.SourceDependenciesCache
+	platforms          platform.Resolver
 
-	imagesAreLocal bool
-	hasBuilt       bool
-	hasDeployed    bool
-	intents        *intents
-	devIteration   int
+	devIteration    int
+	isLocalImage    func(imageName string) (bool, error)
+	deployManifests manifest.ManifestListByConfig
+	intents         *Intents
 }
 
-// for testing
-var (
-	statusCheck = deploy.StatusCheck
-)
-
-// HasDeployed returns true if this runner has deployed something.
-func (r *SkaffoldRunner) HasDeployed() bool {
-	return r.hasDeployed
-}
-
-// HasBuilt returns true if this runner has built something.
-func (r *SkaffoldRunner) HasBuilt() bool {
-	return r.hasBuilt
+// DeployManifests returns a list of manifest if this runner has deployed something.
+func (r *SkaffoldRunner) DeployManifests() manifest.ManifestListByConfig {
+	return r.deployManifests
 }

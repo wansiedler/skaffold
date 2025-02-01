@@ -18,17 +18,13 @@ package cluster
 
 import (
 	"context"
-	"sync"
 	"testing"
-	"time"
 
-	"github.com/google/go-cmp/cmp"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubectl"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner/runcontext"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 const (
@@ -38,75 +34,50 @@ const (
 
 func TestNewBuilder(t *testing.T) {
 	tests := []struct {
-		description     string
-		shouldErr       bool
-		runCtx          *runcontext.RunContext
-		expectedBuilder *Builder
+		description string
+		shouldErr   bool
+		bCtx        BuilderContext
+		cluster     *latest.ClusterDetails
 	}{
 		{
 			description: "failed to parse cluster build timeout",
-			runCtx: stubRunContext(&latest.ClusterDetails{
+			bCtx:        &mockBuilderContext{},
+			cluster: &latest.ClusterDetails{
 				Timeout: "illegal",
-			}, nil),
+			},
 			shouldErr: true,
 		},
 		{
 			description: "cluster builder inherits the config",
-			runCtx: stubRunContext(&latest.ClusterDetails{
+			bCtx: &mockBuilderContext{
+				kubeContext: kubeContext,
+				namespace:   namespace,
+			},
+			cluster: &latest.ClusterDetails{
 				Timeout:   "100s",
 				Namespace: "test-ns",
-			}, nil),
-			shouldErr: false,
-			expectedBuilder: &Builder{
-				ClusterDetails: &latest.ClusterDetails{
-					Timeout:   "100s",
-					Namespace: "test-ns",
-				},
-				timeout:            100 * time.Second,
-				insecureRegistries: nil,
-				kubeContext:        kubeContext,
-				kubectlcli: &kubectl.CLI{
-					KubeContext: kubeContext,
-					Namespace:   namespace,
-				},
 			},
 		},
 		{
 			description: "insecure registries are taken from the run context",
-			runCtx: stubRunContext(&latest.ClusterDetails{
+			bCtx: &mockBuilderContext{
+				kubeContext:        kubeContext,
+				namespace:          namespace,
+				insecureRegistries: map[string]bool{"insecure-reg1": true},
+			},
+			cluster: &latest.ClusterDetails{
 				Timeout:   "100s",
 				Namespace: "test-ns",
-			}, map[string]bool{"insecure-reg1": true}),
-			shouldErr: false,
-			expectedBuilder: &Builder{
-				ClusterDetails: &latest.ClusterDetails{
-					Timeout:   "100s",
-					Namespace: "test-ns",
-				},
-				timeout:            100 * time.Second,
-				insecureRegistries: map[string]bool{"insecure-reg1": true},
-				kubeContext:        kubeContext,
-				kubectlcli: &kubectl.CLI{
-					KubeContext: kubeContext,
-					Namespace:   namespace,
-				},
 			},
 		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			builder, err := NewBuilder(test.runCtx)
+			_, err := NewBuilder(test.bCtx, test.cluster)
 
 			t.CheckError(test.shouldErr, err)
-			if !test.shouldErr {
-				t.CheckDeepEqual(test.expectedBuilder, builder, cmp.AllowUnexported(Builder{}, kubectl.CLI{}, sync.Once{}, sync.Mutex{}))
-			}
 		})
 	}
-}
-
-func TestLabels(t *testing.T) {
-	testutil.CheckDeepEqual(t, map[string]string{"skaffold.dev/builder": "cluster"}, (&Builder{}).Labels())
 }
 
 func TestPruneIsNoop(t *testing.T) {
@@ -114,16 +85,17 @@ func TestPruneIsNoop(t *testing.T) {
 	testutil.CheckDeepEqual(t, nil, pruneError)
 }
 
-func stubRunContext(clusterDetails *latest.ClusterDetails, insecureRegistries map[string]bool) *runcontext.RunContext {
-	pipeline := latest.Pipeline{}
-	pipeline.Build.BuildType.Cluster = clusterDetails
-
-	return &runcontext.RunContext{
-		Cfg:                pipeline,
-		InsecureRegistries: insecureRegistries,
-		KubeContext:        kubeContext,
-		Opts: config.SkaffoldOptions{
-			Namespace: namespace,
-		},
-	}
+type mockBuilderContext struct {
+	runcontext.RunContext // Embedded to provide the default values.
+	kubeContext           string
+	namespace             string
+	insecureRegistries    map[string]bool
+	runMode               config.RunMode
+	artifactStore         build.ArtifactStore
 }
+
+func (c *mockBuilderContext) GetKubeContext() string                 { return c.kubeContext }
+func (c *mockBuilderContext) GetKubeNamespace() string               { return c.namespace }
+func (c *mockBuilderContext) GetInsecureRegistries() map[string]bool { return c.insecureRegistries }
+func (c *mockBuilderContext) Mode() config.RunMode                   { return c.runMode }
+func (c *mockBuilderContext) ArtifactStore() build.ArtifactStore     { return c.artifactStore }

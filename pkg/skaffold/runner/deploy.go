@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Skaffold Authors
+Copyright 2021 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,123 +22,129 @@ import (
 	"io"
 	"time"
 
-	"github.com/sirupsen/logrus"
-	"k8s.io/client-go/tools/clientcmd/api"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes"
-	kubectx "github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes/context"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/constants"
+	deployutil "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/deploy/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/event"
+	eventV2 "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/event/v2"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/instrumentation"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/manifest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
 )
 
-func (r *SkaffoldRunner) Deploy(ctx context.Context, out io.Writer, artifacts []build.Artifact) error {
-	if r.runCtx.Opts.RenderOnly {
-		return r.Render(ctx, out, artifacts, false, r.runCtx.Opts.RenderOutput)
+// DeployAndLog deploys a list of already built artifacts and optionally show the logs.
+func (r *SkaffoldRunner) DeployAndLog(ctx context.Context, out io.Writer, artifacts []graph.Artifact, list manifest.ManifestListByConfig) error {
+	defer r.deployer.GetLogger().Stop()
+
+	// Logs should be retrieved up to just before the deploy
+	r.deployer.GetLogger().SetSince(time.Now())
+	// First deploy
+	if err := r.Deploy(ctx, out, artifacts, list); err != nil {
+		return err
 	}
 
-	color.Default.Fprintln(out, "Tags used in deployment:")
+	defer r.deployer.GetAccessor().Stop()
+
+	if err := r.deployer.GetAccessor().Start(ctx, out); err != nil {
+		log.Entry(ctx).Warn("Error starting port forwarding:", err)
+	}
+
+	// Start printing the logs after deploy is finished
+	if err := r.deployer.GetLogger().Start(ctx, out); err != nil {
+		return fmt.Errorf("starting logger: %w", err)
+	}
+
+	if r.runCtx.Tail() || r.runCtx.PortForward() {
+		output.Yellow.Fprintln(out, "Press Ctrl+C to exit")
+		<-ctx.Done()
+	}
+
+	return nil
+}
+
+func (r *SkaffoldRunner) Deploy(ctx context.Context, out io.Writer, artifacts []graph.Artifact, list manifest.ManifestListByConfig) error {
+	defer r.deployer.GetStatusMonitor().Reset()
+
+	out, ctx = output.WithEventContext(ctx, out, constants.Deploy, constants.SubtaskIDNone)
+
+	if len(artifacts) > 0 {
+		output.Default.Fprintln(out, "Tags used in deployment:")
+	}
 
 	for _, artifact := range artifacts {
-		color.Default.Fprintf(out, " - %s -> ", artifact.ImageName)
+		output.Default.Fprintf(out, " - %s -> ", artifact.ImageName)
 		fmt.Fprintln(out, artifact.Tag)
 	}
 
-	if r.imagesAreLocal && len(artifacts) > 0 {
-		logrus.Debugln(`Local images can't be referenced by digest.
+	var localImages []graph.Artifact
+	for _, a := range artifacts {
+		if isLocal, err := r.isLocalImage(a.ImageName); err != nil {
+			return err
+		} else if isLocal {
+			localImages = append(localImages, a)
+		}
+	}
+
+	if len(localImages) > 0 {
+		log.Entry(ctx).Debug(`Local images can't be referenced by digest.
 They are tagged and referenced by a unique, local only, tag instead.
 See https://skaffold.dev/docs/pipeline-stages/taggers/#how-tagging-works`)
 	}
 
-	// Check that the cluster is reachable.
-	// This gives a better error message when the cluster can't
-	// be reached.
-	if err := failIfClusterIsNotReachable(); err != nil {
-		return fmt.Errorf("unable to connect to Kubernetes: %w", err)
+	deployOut, postDeployFn, err := deployutil.WithLogFile(time.Now().Format(deployutil.TimeFormat)+".log", out, r.runCtx.Muted())
+	if err != nil {
+		return err
 	}
 
-	if config.IsImageLoadingRequired(r.runCtx.KubeContext) {
-		err := r.loadImagesIntoCluster(ctx, out, artifacts)
-		if err != nil {
+	event.DeployInProgress()
+	eventV2.TaskInProgress(constants.Deploy, "Deploy to cluster")
+	ctx, endTrace := instrumentation.StartTrace(ctx, "Deploy_Deploying")
+	defer endTrace()
+
+	// we only want to register images that are local AND were built by this runner OR forced to load via flag
+	var localAndBuiltImages []graph.Artifact
+	for _, image := range localImages {
+		if r.runCtx.ForceLoadImages() || r.wasBuilt(image.Tag) {
+			localAndBuiltImages = append(localAndBuiltImages, image)
+		}
+	}
+
+	r.deployer.RegisterLocalImages(localAndBuiltImages)
+	err = r.deployer.Deploy(ctx, deployOut, artifacts, list)
+	r.deployManifests = list // set even if deploy may have failed, because we want to cleanup any partially created resources
+	postDeployFn()
+	if err != nil {
+		event.DeployFailed(err)
+		eventV2.TaskFailed(constants.Deploy, err)
+		endTrace(instrumentation.TraceEndError(err))
+		return err
+	}
+
+	statusCheckOut, postStatusCheckFn, err := deployutil.WithStatusCheckLogFile(time.Now().Format(deployutil.TimeFormat)+".log", out, r.runCtx.Muted())
+	defer postStatusCheckFn()
+	if err != nil {
+		endTrace(instrumentation.TraceEndError(err))
+		return err
+	}
+
+	event.DeployComplete()
+	if !r.runCtx.IterativeStatusCheck() {
+		// run final aggregated status check only if iterative status check is turned off.
+		if err = r.deployer.GetStatusMonitor().Check(ctx, statusCheckOut); err != nil {
+			eventV2.TaskFailed(constants.Deploy, err)
 			return err
 		}
 	}
-
-	deployResult := r.deployer.Deploy(ctx, out, artifacts, r.labellers)
-	r.hasDeployed = true
-	if err := deployResult.GetError(); err != nil {
-		return err
-	}
-	r.runCtx.UpdateNamespaces(deployResult.Namespaces())
-	return r.performStatusCheck(ctx, out)
-}
-
-func (r *SkaffoldRunner) loadImagesIntoCluster(ctx context.Context, out io.Writer, artifacts []build.Artifact) error {
-	currentContext, err := r.getCurrentContext()
-	if err != nil {
-		return err
-	}
-
-	if config.IsKindCluster(r.runCtx.KubeContext) {
-		kindCluster := config.KindClusterName(currentContext.Cluster)
-
-		// With `kind`, docker images have to be loaded with the `kind` CLI.
-		if err := r.loadImagesInKindNodes(ctx, out, kindCluster, artifacts); err != nil {
-			return fmt.Errorf("loading images into kind nodes: %w", err)
-		}
-	}
-
-	if config.IsK3dCluster(r.runCtx.KubeContext) {
-		k3dCluster := config.K3dClusterName(currentContext.Cluster)
-
-		// With `k3d`, docker images have to be loaded with the `k3d` CLI.
-		if err := r.loadImagesInK3dNodes(ctx, out, k3dCluster, artifacts); err != nil {
-			return fmt.Errorf("loading images into k3d nodes: %w", err)
-		}
-	}
-
+	eventV2.TaskSucceeded(constants.Deploy)
 	return nil
 }
 
-func (r *SkaffoldRunner) getCurrentContext() (*api.Context, error) {
-	currentCfg, err := kubectx.CurrentConfig()
-	if err != nil {
-		return nil, fmt.Errorf("unable to get kubernetes config: %w", err)
+func (r *SkaffoldRunner) wasBuilt(tag string) bool {
+	for _, built := range r.Builds {
+		if built.Tag == tag {
+			return true
+		}
 	}
-
-	currentContext, present := currentCfg.Contexts[r.runCtx.KubeContext]
-	if !present {
-		return nil, fmt.Errorf("unable to get current kubernetes context: %w", err)
-	}
-	return currentContext, nil
-}
-
-// failIfClusterIsNotReachable checks that Kubernetes is reachable.
-// This gives a clear early error when the cluster can't be reached.
-func failIfClusterIsNotReachable() error {
-	client, err := kubernetes.Client()
-	if err != nil {
-		return err
-	}
-
-	_, err = client.Discovery().ServerVersion()
-	return err
-}
-
-func (r *SkaffoldRunner) performStatusCheck(ctx context.Context, out io.Writer) error {
-	// Check if we need to perform deploy status
-	if !r.runCtx.Opts.StatusCheck {
-		return nil
-	}
-
-	start := time.Now()
-	color.Default.Fprintln(out, "Waiting for deployments to stabilize...")
-
-	err := statusCheck(ctx, r.defaultLabeller, r.runCtx, out)
-	if err != nil {
-		return err
-	}
-
-	color.Default.Fprintln(out, "Deployments stabilized in", time.Since(start))
-	return nil
+	return false
 }

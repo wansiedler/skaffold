@@ -26,7 +26,7 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestNewCmdDescription(t *testing.T) {
@@ -95,7 +95,7 @@ func TestNewCmdOutput(t *testing.T) {
 }
 
 func TestNewCmdWithFlags(t *testing.T) {
-	cmd := NewCmd("").WithFlags(func(flagSet *pflag.FlagSet) {
+	cmd := NewCmd("").WithFlagAdder(func(flagSet *pflag.FlagSet) {
 		flagSet.Bool("test", false, "usage")
 	}).NoArgs(nil)
 
@@ -103,6 +103,11 @@ func TestNewCmdWithFlags(t *testing.T) {
 
 	testutil.CheckDeepEqual(t, 1, len(flags))
 	testutil.CheckDeepEqual(t, "usage", flags["test"].Usage)
+}
+
+func TestNewCmdWithHouseKeepingMessages(t *testing.T) {
+	cmd := NewCmd("run").WithHouseKeepingMessages().NoArgs(nil)
+	testutil.CheckDeepEqual(t, map[string]string{HouseKeepingMessagesAllowedAnnotation: "true"}, cmd.Annotations)
 }
 
 func TestNewCmdWithCommonFlags(t *testing.T) {
@@ -121,6 +126,26 @@ func TestNewCmdHidden(t *testing.T) {
 
 	cmd = NewCmd("").Hidden().NoArgs(nil)
 	testutil.CheckDeepEqual(t, true, cmd.Hidden)
+}
+
+func TestNewCmdWithPostRunHooks(t *testing.T) {
+	var callOrder []int
+	cmd := NewCmd("").
+		WithPostRunHook(func(err error) error {
+			callOrder = append(callOrder, 1)
+			return err
+		}).
+		WithPostRunHook(func(err error) error {
+			callOrder = append(callOrder, 2)
+			return err
+		}).
+		NoArgs(func(c context.Context, w io.Writer) error {
+			return fmt.Errorf("some err")
+		})
+	err := cmd.RunE(nil, nil)
+	testutil.CheckErrorAndFailNow(t, true, err)
+	testutil.CheckDeepEqual(t, err.Error(), "some err")
+	testutil.CheckDeepEqual(t, []int{1, 2}, callOrder)
 }
 
 func listFlags(set *pflag.FlagSet) map[string]*pflag.Flag {

@@ -18,7 +18,7 @@ package portforward
 
 import (
 	"context"
-	"io/ioutil"
+	"io"
 	"reflect"
 	"testing"
 	"time"
@@ -28,10 +28,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/event"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	schemautil "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
+	testEvent "github.com/GoogleContainerTools/skaffold/v2/testutil/event"
 )
 
 func TestAutomaticPortForwardPod(t *testing.T) {
@@ -57,9 +59,9 @@ func TestAutomaticPortForwardPod(t *testing.T) {
 						Type:      "pod",
 						Name:      "podname",
 						Namespace: "namespace",
-						Port:      8080,
+						Port:      schemautil.FromInt(8080),
 						Address:   "127.0.0.1",
-						LocalPort: 8080,
+						LocalPort: 0,
 					},
 					ownerReference:         "owner",
 					automaticPodForwarding: true,
@@ -102,9 +104,9 @@ func TestAutomaticPortForwardPod(t *testing.T) {
 						Type:      "pod",
 						Name:      "podname",
 						Namespace: "namespace",
-						Port:      8080,
+						Port:      schemautil.FromInt(8080),
 						Address:   "127.0.0.1",
-						LocalPort: 8080,
+						LocalPort: 0,
 					},
 					ownerReference:         "owner",
 					automaticPodForwarding: true,
@@ -178,9 +180,9 @@ func TestAutomaticPortForwardPod(t *testing.T) {
 						Type:      "pod",
 						Name:      "podname",
 						Namespace: "namespace",
-						Port:      8080,
+						Port:      schemautil.FromInt(8080),
 						Address:   "127.0.0.1",
-						LocalPort: 8080,
+						LocalPort: 0,
 					},
 					ownerReference:         "owner",
 					portName:               "portname",
@@ -195,9 +197,9 @@ func TestAutomaticPortForwardPod(t *testing.T) {
 						Type:      "pod",
 						Name:      "podname2",
 						Namespace: "namespace2",
-						Port:      50051,
+						Port:      schemautil.FromInt(50051),
 						Address:   "127.0.0.1",
-						LocalPort: 50051,
+						LocalPort: 0,
 					},
 					ownerReference:         "owner",
 					portName:               "portname2",
@@ -262,9 +264,9 @@ func TestAutomaticPortForwardPod(t *testing.T) {
 						Type:      "pod",
 						Name:      "podname",
 						Namespace: "namespace",
-						Port:      8080,
+						Port:      schemautil.FromInt(8080),
 						Address:   "127.0.0.1",
-						LocalPort: 8080,
+						LocalPort: 0,
 					},
 					ownerReference:         "owner",
 					automaticPodForwarding: true,
@@ -279,9 +281,9 @@ func TestAutomaticPortForwardPod(t *testing.T) {
 						Type:      "pod",
 						Name:      "podname2",
 						Namespace: "namespace2",
-						Port:      8080,
+						Port:      schemautil.FromInt(8080),
 						Address:   "127.0.0.1",
-						LocalPort: 8080,
+						LocalPort: 0,
 					},
 					ownerReference:         "owner",
 					automaticPodForwarding: true,
@@ -345,9 +347,9 @@ func TestAutomaticPortForwardPod(t *testing.T) {
 						Type:      "pod",
 						Name:      "podname",
 						Namespace: "namespace",
-						Port:      8080,
+						Port:      schemautil.FromInt(8080),
 						Address:   "127.0.0.1",
-						LocalPort: 8080,
+						LocalPort: 0,
 					},
 					ownerReference:         "owner",
 					automaticPodForwarding: true,
@@ -400,18 +402,19 @@ func TestAutomaticPortForwardPod(t *testing.T) {
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			event.InitializeState(latest.Pipeline{}, "test", true, true, true)
+			testEvent.InitializeState([]latest.Pipeline{{}})
 			taken := map[int]struct{}{}
-			t.Override(&retrieveAvailablePort, mockRetrieveAvailablePort("127.0.0.1", taken, test.availablePorts))
-			t.Override(&topLevelOwnerKey, func(metav1.Object, string) string { return "owner" })
+			t.Override(&retrieveAvailablePort, mockRetrieveAvailablePort(util.Loopback, taken, test.availablePorts))
+			t.Override(&topLevelOwnerKey, func(context.Context, metav1.Object, string, string) string { return "owner" })
 
 			if test.forwarder == nil {
 				test.forwarder = newTestForwarder()
 			}
-			entryManager := NewEntryManager(ioutil.Discard, nil)
+			entryManager := NewEntryManager(nil)
 			entryManager.entryForwarder = test.forwarder
 
-			p := NewWatchingPodForwarder(entryManager, kubernetes.NewImageList(), nil)
+			p := NewWatchingPodForwarder(entryManager, "", kubernetes.NewImageList(), allPorts)
+			p.Start(context.Background(), io.Discard, nil)
 			for _, pod := range test.pods {
 				err := p.portForwardPod(context.Background(), pod)
 				t.CheckError(test.shouldErr, err)
@@ -420,9 +423,12 @@ func TestAutomaticPortForwardPod(t *testing.T) {
 			t.CheckDeepEqual(test.expectedPorts, test.forwarder.forwardedPorts.List())
 
 			// cmp.Diff cannot access unexported fields, so use reflect.DeepEqual here directly
-			actualForwardedResources := test.forwarder.forwardedResources.resources
-			if !reflect.DeepEqual(test.expectedEntries, actualForwardedResources) {
-				t.Errorf("Forwarded entries differs from expected entries. Expected: %v, Actual: %v", test.expectedEntries, actualForwardedResources)
+			for k, v := range test.expectedEntries {
+				if frv, found := test.forwarder.forwardedResources.Load(k); !found {
+					t.Errorf("Forwarded entries missing key %v, value %v", k, v)
+				} else if !reflect.DeepEqual(v, frv) {
+					t.Errorf("Forwarded entries mismatch for key %v: Expected %v, Actual  %v", k, v, frv)
+				}
 			}
 		})
 	}
@@ -473,9 +479,9 @@ func TestStartPodForwarder(t *testing.T) {
 
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			event.InitializeState(latest.Pipeline{}, "", true, true, true)
-			t.Override(&topLevelOwnerKey, func(metav1.Object, string) string { return "owner" })
-			t.Override(&newPodWatcher, func(kubernetes.PodSelector, []string) kubernetes.PodWatcher {
+			testEvent.InitializeState([]latest.Pipeline{{}})
+			t.Override(&topLevelOwnerKey, func(context.Context, metav1.Object, string, string) string { return "owner" })
+			t.Override(&newPodWatcher, func(kubernetes.PodSelector) kubernetes.PodWatcher {
 				return &fakePodWatcher{
 					events: []kubernetes.PodEvent{test.event},
 				}
@@ -485,10 +491,10 @@ func TestStartPodForwarder(t *testing.T) {
 			imageList.Add("image")
 
 			fakeForwarder := newTestForwarder()
-			entryManager := NewEntryManager(ioutil.Discard, fakeForwarder)
+			entryManager := NewEntryManager(fakeForwarder)
 
-			p := NewWatchingPodForwarder(entryManager, imageList, nil)
-			p.Start(context.Background())
+			p := NewWatchingPodForwarder(entryManager, "", imageList, allPorts)
+			p.Start(context.Background(), io.Discard, nil)
 
 			// wait for the pod resource to be forwarded
 			err := wait.PollImmediate(10*time.Millisecond, 100*time.Millisecond, func() (bool, error) {
@@ -511,7 +517,9 @@ func (f *fakePodWatcher) Register(receiver chan<- kubernetes.PodEvent) {
 	f.receiver = receiver
 }
 
-func (f *fakePodWatcher) Start() (func(), error) {
+func (f *fakePodWatcher) Deregister(_ chan<- kubernetes.PodEvent) {} // noop
+
+func (f *fakePodWatcher) Start(_ context.Context, _ string, _ []string) (func(), error) {
 	go func() {
 		for _, event := range f.events {
 			f.receiver <- event

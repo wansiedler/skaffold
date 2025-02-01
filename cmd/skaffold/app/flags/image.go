@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
 )
 
 // Images describes a flag which contains a list of image names
@@ -33,26 +33,50 @@ type Images struct {
 
 type image struct {
 	name     string
-	artifact *build.Artifact
+	artifact *graph.Artifact
 }
 
 // String Implements String() method for pflag interface and
-// returns a comma separated list of images.
+// returns a placeholder for the help text.
 func (i *Images) String() string {
+	return strings.Join(i.GetSlice(), ",")
+}
+
+// Type Implements Type() method for pflag interface
+func (i *Images) Type() string {
+	return fmt.Sprintf("%T", i)
+}
+
+// SetNil Implements SetNil() method for our Nillable interface
+func (i *Images) SetNil() error {
+	i.images = []image{}
+	return nil
+}
+
+// Set Implements Set() method for pflag interface.  We append values
+// to preserve compatibility with previous behaviour where each image
+// required a separate `-i` flag.
+func (i *Images) Set(csv string) error {
+	for _, split := range strings.Split(csv, ",") {
+		if err := i.Append(split); err != nil {
+			return fmt.Errorf("%s: %w", split, err)
+		}
+	}
+	return nil
+}
+
+// GetSlice Implements GetSlice() method for pflag SliceValue interface and
+// returns a slice of image names.
+func (i *Images) GetSlice() []string {
 	names := make([]string, len(i.images))
 	for i, image := range i.images {
 		names[i] = image.name
 	}
-	return strings.Join(names, ",")
+	return names
 }
 
-// Usage Implements Usage() method for pflag interface
-func (i *Images) Usage() string {
-	return i.usage
-}
-
-// Set Implements Set() method for pflag interface
-func (i *Images) Set(value string) error {
+// Append Implements Append() method for pflag SliceValue interface
+func (i *Images) Append(value string) error {
 	a, err := convertImageToArtifact(value)
 	if err != nil {
 		return err
@@ -61,14 +85,23 @@ func (i *Images) Set(value string) error {
 	return nil
 }
 
-// Type Implements Type() method for pflag interface
-func (i *Images) Type() string {
-	return fmt.Sprintf("%T", i)
+// Replace Implements Replace() method for pflag SliceValue interface
+func (i *Images) Replace(images []string) error {
+	newImages := make([]image, 0, len(images))
+	for _, value := range images {
+		a, err := convertImageToArtifact(value)
+		if err != nil {
+			return err
+		}
+		newImages = append(newImages, image{name: value, artifact: a})
+	}
+	i.images = newImages
+	return nil
 }
 
 // Artifacts returns an artifact representation for the corresponding image
-func (i *Images) Artifacts() []build.Artifact {
-	var artifacts []build.Artifact
+func (i *Images) Artifacts() []graph.Artifact {
+	var artifacts []graph.Artifact
 
 	for _, image := range i.images {
 		artifacts = append(artifacts, *image.artifact)
@@ -85,15 +118,25 @@ func NewEmptyImages(usage string) *Images {
 	}
 }
 
-func convertImageToArtifact(value string) (*build.Artifact, error) {
+func convertImageToArtifact(value string) (*graph.Artifact, error) {
 	if value == "" {
 		return nil, errors.New("cannot add an empty image value")
+	}
+	if c := strings.SplitN(value, "=", 2); len(c) == 2 {
+		_, err := docker.ParseReference(c[1])
+		if err != nil {
+			return nil, err
+		}
+		return &graph.Artifact{
+			ImageName: c[0],
+			Tag:       c[1],
+		}, nil
 	}
 	parsed, err := docker.ParseReference(value)
 	if err != nil {
 		return nil, err
 	}
-	return &build.Artifact{
+	return &graph.Artifact{
 		ImageName: parsed.BaseName,
 		Tag:       value,
 	}, nil

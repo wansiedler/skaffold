@@ -1,8 +1,8 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: getting-started
+  name: getting-started-custom
 spec:
   containers:
-  - name: getting-started
-    image: skaffold-custom
+  - name: getting-started-custom
+    image: ko://github.com/googlecontainertools/skaffold/examples/custom

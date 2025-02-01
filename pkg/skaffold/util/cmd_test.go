@@ -17,12 +17,13 @@ limitations under the License.
 package util
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func helperCommand(s ...string) *exec.Cmd {
@@ -38,7 +39,6 @@ func TestHelperProcess(*testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
 	}
-	defer os.Exit(0)
 
 	args := os.Args
 	for len(args) > 0 {
@@ -65,6 +65,8 @@ func TestHelperProcess(*testing.T) {
 		fmt.Fprintf(os.Stderr, "Unknown command %q\n", cmd)
 		os.Exit(2)
 	}
+
+	os.Exit(0)
 }
 
 func TestCmd_RunCmdOut(t *testing.T) {
@@ -89,7 +91,7 @@ func TestCmd_RunCmdOut(t *testing.T) {
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			got, err := RunCmdOut(test.cmd)
+			got, err := RunCmdOut(context.Background(), test.cmd)
 
 			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.want, string(got))
 		})

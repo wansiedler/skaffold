@@ -1,6 +1,8 @@
 ### Example: using the envTemplate tag policy
 
-This example reuses the image name and uses an environment variable `FOO` to tag the image.
+[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://ssh.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/GoogleContainerTools/skaffold&cloudshell_open_in_editor=README.md&cloudshell_workspace=examples/tagging-with-environment-variables)
+
+This example uses an environment variable `FOO` to tag the image.
 The way you configure it in `skaffold.yaml` is the following build stanza:
 
 ```yaml
@@ -9,9 +11,8 @@ build:
      - image: skaffold-example
      tagPolicy:
        envTemplate:
-         template: "{{.IMAGE_NAME}}:{{.FOO}}"
+         template: "{{.FOO}}"
 ```
 
 1. define `tagPolicy` to be `envTemplate`
 2. use [go templates](https://golang.org/pkg/text/template) syntax
-3. The `IMAGE_NAME` variable is built-in and reuses the value defined in the artifacts' `image`.

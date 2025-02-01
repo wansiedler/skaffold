@@ -19,18 +19,21 @@ package cache
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
+	"sync"
 
-	homedir "github.com/mitchellh/go-homedir"
-	"github.com/sirupsen/logrus"
+	"github.com/mitchellh/go-homedir"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/yaml"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/constants"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/yaml"
 )
 
 // ImageDetails holds the Digest and ID of an image
@@ -45,48 +48,87 @@ type ArtifactCache map[string]ImageDetails
 // cache holds any data necessary for accessing the cache
 type cache struct {
 	artifactCache      ArtifactCache
+	hashByName         map[string]string
+	artifactGraph      graph.ArtifactGraph
+	artifactStore      build.ArtifactStore
+	cacheMutex         sync.RWMutex
 	client             docker.LocalDaemon
-	insecureRegistries map[string]bool
+	cfg                Config
 	cacheFile          string
-	imagesAreLocal     bool
-	hashForArtifact    func(ctx context.Context, a *latest.Artifact) (string, error)
+	isLocalImage       func(imageName string) (bool, error)
+	importMissingImage func(imageName string) (bool, error)
+	lister             DependencyLister
 }
 
 // DependencyLister fetches a list of dependencies for an artifact
-type DependencyLister func(ctx context.Context, artifact *latest.Artifact) ([]string, error)
+type DependencyLister func(ctx context.Context, artifact *latest.Artifact, tag string) ([]string, error)
+
+type Config interface {
+	docker.Config
+	PipelineForImage(imageName string) (latest.Pipeline, bool)
+	GetPipelines() []latest.Pipeline
+	DefaultPipeline() latest.Pipeline
+	GetCluster() config.Cluster
+	CacheArtifacts() bool
+	CacheFile() string
+	Mode() config.RunMode
+}
 
 // NewCache returns the current state of the cache
-func NewCache(runCtx *runcontext.RunContext, imagesAreLocal bool, dependencies DependencyLister) (Cache, error) {
-	if !runCtx.Opts.CacheArtifacts {
+func NewCache(ctx context.Context, cfg Config, isLocalImage func(imageName string) (bool, error), dependencies DependencyLister, graph graph.ArtifactGraph, store build.ArtifactStore) (Cache, error) {
+	if !cfg.CacheArtifacts() {
 		return &noCache{}, nil
 	}
 
-	cacheFile, err := resolveCacheFile(runCtx.Opts.CacheFile)
+	cacheFile, err := resolveCacheFile(cfg.CacheFile())
 	if err != nil {
-		logrus.Warnf("Error resolving cache file, not using skaffold cache: %v", err)
+		log.Entry(context.TODO()).Warnf("Error resolving cache file, not using skaffold cache: %v", err)
 		return &noCache{}, nil
 	}
 
 	artifactCache, err := retrieveArtifactCache(cacheFile)
 	if err != nil {
-		logrus.Warnf("Error retrieving artifact cache, not using skaffold cache: %v", err)
+		log.Entry(context.TODO()).Warnf("Error retrieving artifact cache, not using skaffold cache: %v", err)
 		return &noCache{}, nil
 	}
 
-	client, err := docker.NewAPIClient(runCtx)
-	if imagesAreLocal && err != nil {
-		return nil, fmt.Errorf("getting local Docker client: %w", err)
+	hashByName := make(map[string]string)
+
+	client, err := docker.NewAPIClient(ctx, cfg)
+	if err != nil {
+		// error only if any pipeline is local.
+		for _, p := range cfg.GetPipelines() {
+			for _, a := range p.Build.Artifacts {
+				if local, _ := isLocalImage(a.ImageName); local {
+					return nil, fmt.Errorf("getting local Docker client: %w", err)
+				}
+			}
+		}
+	}
+
+	importMissingImage := func(imageName string) (bool, error) {
+		pipeline, found := cfg.PipelineForImage(imageName)
+		if !found {
+			pipeline = cfg.DefaultPipeline()
+		}
+
+		if pipeline.Build.GoogleCloudBuild != nil || pipeline.Build.Cluster != nil {
+			return false, nil
+		}
+		return pipeline.Build.LocalBuild.TryImportMissing, nil
 	}
 
 	return &cache{
 		artifactCache:      artifactCache,
+		hashByName:         hashByName,
+		artifactGraph:      graph,
+		artifactStore:      store,
 		client:             client,
-		insecureRegistries: runCtx.InsecureRegistries,
+		cfg:                cfg,
 		cacheFile:          cacheFile,
-		imagesAreLocal:     imagesAreLocal,
-		hashForArtifact: func(ctx context.Context, a *latest.Artifact) (string, error) {
-			return getHashForArtifact(ctx, dependencies, a, runCtx.Opts.IsDevMode())
-		},
+		isLocalImage:       isLocalImage,
+		importMissingImage: importMissingImage,
+		lister:             dependencies,
 	}, nil
 }
 
@@ -105,7 +147,7 @@ func resolveCacheFile(cacheFile string) (string, error) {
 
 func retrieveArtifactCache(cacheFile string) (ArtifactCache, error) {
 	cache := ArtifactCache{}
-	contents, err := ioutil.ReadFile(cacheFile)
+	contents, err := os.ReadFile(cacheFile)
 	if err != nil {
 		return nil, err
 	}
@@ -121,5 +163,5 @@ func saveArtifactCache(cacheFile string, contents ArtifactCache) error {
 		return err
 	}
 
-	return ioutil.WriteFile(cacheFile, data, 0755)
+	return os.WriteFile(cacheFile, data, 0755)
 }

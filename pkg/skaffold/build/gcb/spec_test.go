@@ -17,12 +17,15 @@ limitations under the License.
 package gcb
 
 import (
+	"context"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner/runcontext"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestBuildSpecFail(t *testing.T) {
@@ -45,24 +48,26 @@ func TestBuildSpecFail(t *testing.T) {
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			builder := newBuilder(latest.GoogleCloudBuild{})
+			builder := NewBuilder(&mockBuilderContext{}, &latest.GoogleCloudBuild{})
 
-			_, err := builder.buildSpec(test.artifact, "tag", "bucket", "object")
+			_, err := builder.buildSpec(context.Background(), test.artifact, "tag", platform.Matcher{}, "bucket", "object")
 
 			t.CheckError(true, err)
 		})
 	}
 }
 
-func newBuilder(gcb latest.GoogleCloudBuild) *Builder {
-	return NewBuilder(&runcontext.RunContext{
-		Opts: config.SkaffoldOptions{},
-		Cfg: latest.Pipeline{
-			Build: latest.BuildConfig{
-				BuildType: latest.BuildType{
-					GoogleCloudBuild: &gcb,
-				},
-			},
-		},
-	})
+type mockBuilderContext struct {
+	runcontext.RunContext // Embedded to provide the default values.
+	artifactStore         build.ArtifactStore
+	sourceDepsResolver    func() graph.SourceDependenciesCache
 }
+
+func (c *mockBuilderContext) SourceDependenciesResolver() graph.SourceDependenciesCache {
+	if c.sourceDepsResolver != nil {
+		return c.sourceDepsResolver()
+	}
+	return nil
+}
+
+func (c *mockBuilderContext) ArtifactStore() build.ArtifactStore { return c.artifactStore }

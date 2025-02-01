@@ -17,6 +17,7 @@ limitations under the License.
 package kubernetes
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"testing"
@@ -28,7 +29,8 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/client"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func pod(name string) *v1.Pod {
@@ -58,19 +60,19 @@ func (h *hasName) Select(pod *v1.Pod) bool {
 
 func TestPodWatcher(t *testing.T) {
 	testutil.Run(t, "need to register first", func(t *testutil.T) {
-		watcher := NewPodWatcher(&anyPod{}, []string{"ns"})
-		cleanup, err := watcher.Start()
+		watcher := NewPodWatcher(&anyPod{})
+		cleanup, err := watcher.Start(context.Background(), "", []string{"ns"})
 		defer cleanup()
 
 		t.CheckErrorContains("no receiver was registered", err)
 	})
 
 	testutil.Run(t, "fail to get client", func(t *testutil.T) {
-		t.Override(&Client, func() (kubernetes.Interface, error) { return nil, errors.New("unable to get client") })
+		t.Override(&client.Client, func(string) (kubernetes.Interface, error) { return nil, errors.New("unable to get client") })
 
-		watcher := NewPodWatcher(&anyPod{}, []string{"ns"})
+		watcher := NewPodWatcher(&anyPod{})
 		watcher.Register(make(chan PodEvent))
-		cleanup, err := watcher.Start()
+		cleanup, err := watcher.Start(context.Background(), "", []string{"ns"})
 		defer cleanup()
 
 		t.CheckErrorContains("unable to get client", err)
@@ -78,15 +80,15 @@ func TestPodWatcher(t *testing.T) {
 
 	testutil.Run(t, "fail to watch pods", func(t *testutil.T) {
 		clientset := fake.NewSimpleClientset()
-		t.Override(&Client, func() (kubernetes.Interface, error) { return clientset, nil })
+		t.Override(&client.Client, func(string) (kubernetes.Interface, error) { return clientset, nil })
 
 		clientset.Fake.PrependWatchReactor("pods", func(action k8stesting.Action) (handled bool, ret watch.Interface, err error) {
 			return true, nil, errors.New("unable to watch")
 		})
 
-		watcher := NewPodWatcher(&anyPod{}, []string{"ns"})
+		watcher := NewPodWatcher(&anyPod{})
 		watcher.Register(make(chan PodEvent))
-		cleanup, err := watcher.Start()
+		cleanup, err := watcher.Start(context.Background(), "", []string{"ns"})
 		defer cleanup()
 
 		t.CheckErrorContains("unable to watch", err)
@@ -94,25 +96,25 @@ func TestPodWatcher(t *testing.T) {
 
 	testutil.Run(t, "filter 3 events", func(t *testutil.T) {
 		clientset := fake.NewSimpleClientset()
-		t.Override(&Client, func() (kubernetes.Interface, error) { return clientset, nil })
+		t.Override(&client.Client, func(string) (kubernetes.Interface, error) { return clientset, nil })
 
 		podSelector := &hasName{
 			validNames: []string{"pod1", "pod2", "pod3"},
 		}
 		events := make(chan PodEvent)
-		watcher := NewPodWatcher(podSelector, []string{"ns1", "ns2"})
+		watcher := NewPodWatcher(podSelector)
 		watcher.Register(events)
-		cleanup, err := watcher.Start()
+		cleanup, err := watcher.Start(context.Background(), "", []string{"ns1", "ns2"})
 		defer cleanup()
 		t.CheckNoError(err)
 
 		// Send three pod events among other events
-		clientset.CoreV1().Pods("ns1").Create(pod("pod1"))
-		clientset.CoreV1().Pods("ignored").Create(pod("ignored"))     // Different namespace
-		clientset.CoreV1().Services("ns1").Create(service("ignored")) // Not a pod
-		clientset.CoreV1().Pods("ns2").Create(pod("ignored"))         // Rejected by podSelector
-		clientset.CoreV1().Pods("ns2").Create(pod("pod2"))
-		clientset.CoreV1().Pods("ns2").Create(pod("pod3"))
+		clientset.CoreV1().Pods("ns1").Create(context.Background(), pod("pod1"), metav1.CreateOptions{})
+		clientset.CoreV1().Pods("ignored").Create(context.Background(), pod("ignored"), metav1.CreateOptions{})     // Different namespace
+		clientset.CoreV1().Services("ns1").Create(context.Background(), service("ignored"), metav1.CreateOptions{}) // Not a pod
+		clientset.CoreV1().Pods("ns2").Create(context.Background(), pod("ignored"), metav1.CreateOptions{})         // Rejected by podSelector
+		clientset.CoreV1().Pods("ns2").Create(context.Background(), pod("pod2"), metav1.CreateOptions{})
+		clientset.CoreV1().Pods("ns2").Create(context.Background(), pod("pod3"), metav1.CreateOptions{})
 
 		// Retrieve three events
 		var podEvents []PodEvent

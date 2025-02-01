@@ -17,82 +17,288 @@ limitations under the License.
 package gcb
 
 import (
+	"context"
 	"testing"
 
-	cloudbuild "google.golang.org/api/cloudbuild/v1"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"google.golang.org/api/cloudbuild/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestDockerBuildSpec(t *testing.T) {
-	artifact := &latest.Artifact{
-		ArtifactType: latest.ArtifactType{
-			DockerArtifact: &latest.DockerArtifact{
-				DockerfilePath: "Dockerfile",
-				BuildArgs: map[string]*string{
-					"arg1": util.StringPtr("value1"),
-					"arg2": nil,
+	tests := []struct {
+		description string
+		artifact    *latest.Artifact
+		platforms   platform.Matcher
+		expected    cloudbuild.Build
+		shouldErr   bool
+	}{
+		{
+			description: "normal docker build",
+			artifact: &latest.Artifact{
+				ArtifactType: latest.ArtifactType{
+					DockerArtifact: &latest.DockerArtifact{
+						DockerfilePath: "Dockerfile",
+						BuildArgs: map[string]*string{
+							"arg1": util.Ptr("value1"),
+							"arg2": nil,
+						},
+					},
 				},
 			},
-		},
-	}
-
-	builder := newBuilder(latest.GoogleCloudBuild{
-		DockerImage: "docker/docker",
-		DiskSizeGb:  100,
-		MachineType: "n1-standard-1",
-		Timeout:     "10m",
-	})
-	desc, err := builder.buildSpec(artifact, "nginx", "bucket", "object")
-
-	expected := cloudbuild.Build{
-		LogsBucket: "bucket",
-		Source: &cloudbuild.Source{
-			StorageSource: &cloudbuild.StorageSource{
-				Bucket: "bucket",
-				Object: "object",
+			expected: cloudbuild.Build{
+				LogsBucket: "bucket",
+				Source: &cloudbuild.Source{
+					StorageSource: &cloudbuild.StorageSource{
+						Bucket: "bucket",
+						Object: "object",
+					},
+				},
+				Steps: []*cloudbuild.BuildStep{{
+					Name: "docker/docker",
+					Args: []string{"build", "--tag", "nginx", "-f", "Dockerfile", "--build-arg", "arg1=value1", "--build-arg", "arg2", "."},
+				}},
+				Images: []string{"nginx"},
+				Options: &cloudbuild.BuildOptions{
+					DiskSizeGb:  100,
+					MachineType: "n1-standard-1",
+				},
+				Timeout: "10m",
 			},
 		},
-		Steps: []*cloudbuild.BuildStep{{
-			Name: "docker/docker",
-			Args: []string{"build", "--tag", "nginx", "-f", "Dockerfile", "--build-arg", "arg1=value1", "--build-arg", "arg2", "."},
-		}},
-		Images: []string{"nginx"},
-		Options: &cloudbuild.BuildOptions{
-			DiskSizeGb:  100,
-			MachineType: "n1-standard-1",
+		{
+			description: "docker build with artifact dependencies",
+			artifact: &latest.Artifact{
+				ImageName: "img1",
+				ArtifactType: latest.ArtifactType{
+					DockerArtifact: &latest.DockerArtifact{
+						DockerfilePath: "Dockerfile",
+						BuildArgs: map[string]*string{
+							"arg1": util.Ptr("value1"),
+							"arg2": nil,
+						},
+					},
+				},
+				Dependencies: []*latest.ArtifactDependency{{ImageName: "img2", Alias: "IMG2"}, {ImageName: "img3", Alias: "IMG3"}},
+			},
+			expected: cloudbuild.Build{
+				LogsBucket: "bucket",
+				Source: &cloudbuild.Source{
+					StorageSource: &cloudbuild.StorageSource{
+						Bucket: "bucket",
+						Object: "object",
+					},
+				},
+				Steps: []*cloudbuild.BuildStep{{
+					Name: "docker/docker",
+					Args: []string{"build", "--tag", "nginx", "-f", "Dockerfile", "--build-arg", "IMG2=img2:tag", "--build-arg", "IMG3=img3:tag", "--build-arg", "arg1=value1", "--build-arg", "arg2", "."},
+				}},
+				Images: []string{"nginx"},
+				Options: &cloudbuild.BuildOptions{
+					DiskSizeGb:  100,
+					MachineType: "n1-standard-1",
+				},
+				Timeout: "10m",
+			},
 		},
-		Timeout: "10m",
+		{
+			description: "buildkit `secret` option not supported in GCB",
+			artifact: &latest.Artifact{
+				ArtifactType: latest.ArtifactType{
+					DockerArtifact: &latest.DockerArtifact{
+						DockerfilePath: "Dockerfile",
+						Secrets: []*latest.DockerSecret{
+							{ID: "secret"},
+						},
+					},
+				},
+			},
+			shouldErr: true,
+		},
+		{
+			description: "buildkit `ssh` option not supported in GCB",
+			artifact: &latest.Artifact{
+				ArtifactType: latest.ArtifactType{
+					DockerArtifact: &latest.DockerArtifact{
+						DockerfilePath: "Dockerfile",
+						SSH:            "default",
+					},
+				},
+			},
+			shouldErr: true,
+		},
+
+		{
+			description: "cross-platform build",
+			artifact: &latest.Artifact{
+				ArtifactType: latest.ArtifactType{
+					DockerArtifact: &latest.DockerArtifact{
+						DockerfilePath: "Dockerfile",
+						BuildArgs: map[string]*string{
+							"arg1": util.Ptr("value1"),
+							"arg2": nil,
+						},
+					},
+				},
+			},
+			platforms: platform.Matcher{Platforms: []v1.Platform{{Architecture: "arm", OS: "freebsd"}}},
+			expected: cloudbuild.Build{
+				LogsBucket: "bucket",
+				Source: &cloudbuild.Source{
+					StorageSource: &cloudbuild.StorageSource{
+						Bucket: "bucket",
+						Object: "object",
+					},
+				},
+				Steps: []*cloudbuild.BuildStep{{
+					Name: defaultPlatformEmulatorInstallStep.Image,
+				}, {
+					Name: "docker/docker",
+					Args: []string{"build", "--tag", "nginx", "-f", "Dockerfile", "--platform", "freebsd/arm", "--build-arg", "arg1=value1", "--build-arg", "arg2", "."},
+					Env:  []string{"DOCKER_BUILDKIT=1"},
+				}},
+				Images: []string{"nginx"},
+				Options: &cloudbuild.BuildOptions{
+					DiskSizeGb:  100,
+					MachineType: "n1-standard-1",
+				},
+				Timeout: "10m",
+			},
+		},
 	}
 
-	testutil.CheckErrorAndDeepEqual(t, false, err, expected, desc)
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			t.Override(&docker.EvalBuildArgsWithEnv, func(_ config.RunMode, _ string, _ string, args map[string]*string, extra map[string]*string, _ map[string]string) (map[string]*string, error) {
+				m := make(map[string]*string)
+				for k, v := range args {
+					m[k] = v
+				}
+				for k, v := range extra {
+					m[k] = v
+				}
+				return m, nil
+			})
+
+			store := mockArtifactStore{
+				"img2": "img2:tag",
+				"img3": "img3:tag",
+			}
+
+			builder := NewBuilder(&mockBuilderContext{artifactStore: store}, &latest.GoogleCloudBuild{
+				DockerImage: "docker/docker",
+				DiskSizeGb:  100,
+				MachineType: "n1-standard-1",
+				Timeout:     "10m",
+			})
+
+			desc, err := builder.buildSpec(context.Background(), test.artifact, "nginx", test.platforms, "bucket", "object")
+			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expected, desc)
+		})
+	}
 }
 
 func TestPullCacheFrom(t *testing.T) {
-	artifact := &latest.DockerArtifact{
-		DockerfilePath: "Dockerfile",
-		CacheFrom:      []string{"from/image1", "from/image2"},
+	tests := []struct {
+		description string
+		artifact    *latest.Artifact
+		tag         string
+		platforms   platform.Matcher
+		expected    []*cloudbuild.BuildStep
+		shouldErr   bool
+	}{
+		{
+			description: "multiple cache-from images",
+			artifact: &latest.Artifact{
+				ArtifactType: latest.ArtifactType{
+					DockerArtifact: &latest.DockerArtifact{
+						DockerfilePath: "Dockerfile",
+						CacheFrom:      []string{"from/image1", "from/image2"},
+					},
+				},
+			},
+			tag: "nginx2",
+			expected: []*cloudbuild.BuildStep{{
+				Name:       "docker/docker",
+				Entrypoint: "sh",
+				Args:       []string{"-c", "docker pull from/image1 || true"},
+			}, {
+				Name:       "docker/docker",
+				Entrypoint: "sh",
+				Args:       []string{"-c", "docker pull from/image2 || true"},
+			}, {
+				Name: "docker/docker",
+				Args: []string{"build", "--tag", "nginx2", "-f", "Dockerfile", "--cache-from", "from/image1", "--cache-from", "from/image2", "."},
+			}},
+		},
+		{
+			description: "cache-from self uses tagged image",
+			artifact: &latest.Artifact{
+				ImageName: "gcr.io/k8s-skaffold/test",
+				ArtifactType: latest.ArtifactType{
+					DockerArtifact: &latest.DockerArtifact{
+						DockerfilePath: "Dockerfile",
+						CacheFrom:      []string{"gcr.io/k8s-skaffold/test"},
+					},
+				},
+			},
+			tag: "gcr.io/k8s-skaffold/test:tagged",
+			expected: []*cloudbuild.BuildStep{{
+				Name:       "docker/docker",
+				Entrypoint: "sh",
+				Args:       []string{"-c", "docker pull gcr.io/k8s-skaffold/test:tagged || true"},
+			}, {
+				Name: "docker/docker",
+				Args: []string{"build", "--tag", "gcr.io/k8s-skaffold/test:tagged", "-f", "Dockerfile", "--cache-from", "gcr.io/k8s-skaffold/test:tagged", "."},
+			}},
+		},
+		{
+			description: "cross-platform cache-from images",
+			artifact: &latest.Artifact{
+				ArtifactType: latest.ArtifactType{
+					DockerArtifact: &latest.DockerArtifact{
+						DockerfilePath: "Dockerfile",
+						CacheFrom:      []string{"from/image1", "from/image2"},
+					},
+				},
+			},
+			tag:       "nginx2",
+			platforms: platform.Matcher{Platforms: []v1.Platform{{Architecture: "arm", OS: "freebsd"}}},
+			expected: []*cloudbuild.BuildStep{{
+				Name: defaultPlatformEmulatorInstallStep.Image,
+			}, {
+				Name:       "docker/docker",
+				Entrypoint: "sh",
+				Args:       []string{"-c", "docker pull --platform freebsd/arm from/image1 || true"},
+			}, {
+				Name:       "docker/docker",
+				Entrypoint: "sh",
+				Args:       []string{"-c", "docker pull --platform freebsd/arm from/image2 || true"},
+			}, {
+				Name: "docker/docker",
+				Args: []string{"build", "--tag", "nginx2", "-f", "Dockerfile", "--platform", "freebsd/arm", "--cache-from", "from/image1", "--cache-from", "from/image2", "."},
+				Env:  []string{"DOCKER_BUILDKIT=1"},
+			}},
+		},
 	}
 
-	builder := newBuilder(latest.GoogleCloudBuild{
-		DockerImage: "docker/docker",
-	})
-	desc, err := builder.dockerBuildSpec(artifact, "nginx2")
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			t.Override(&docker.EvalBuildArgsWithEnv, func(_ config.RunMode, _ string, _ string, args map[string]*string, _ map[string]*string, _ map[string]string) (map[string]*string, error) {
+				return args, nil
+			})
+			builder := NewBuilder(&mockBuilderContext{}, &latest.GoogleCloudBuild{
+				DockerImage: "docker/docker",
+			})
+			desc, err := builder.dockerBuildSpec(test.artifact, test.tag, test.platforms)
 
-	expected := []*cloudbuild.BuildStep{{
-		Name:       "docker/docker",
-		Entrypoint: "sh",
-		Args:       []string{"-c", "docker pull from/image1 || true"},
-	}, {
-		Name:       "docker/docker",
-		Entrypoint: "sh",
-		Args:       []string{"-c", "docker pull from/image2 || true"},
-	}, {
-		Name: "docker/docker",
-		Args: []string{"build", "--tag", "nginx2", "-f", "Dockerfile", "--cache-from", "from/image1", "--cache-from", "from/image2", "."},
-	}}
-
-	testutil.CheckErrorAndDeepEqual(t, false, err, expected, desc.Steps)
+			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expected, desc.Steps)
+		})
+	}
 }

@@ -20,38 +20,44 @@ import (
 	"context"
 	"io"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
 )
 
 // Tester is the top level test executor in Skaffold.
 // A tester is really a collection of artifact-specific testers,
-// each of which contains one or more TestRunners which implements
+// each of which contains one or more Tester which implements
 // a single test run.
 type Tester interface {
-	Test(context.Context, io.Writer, []build.Artifact) error
+	Test(context.Context, io.Writer, []graph.Artifact) error
+	TestDependencies(ctx context.Context, artifact *latest.Artifact) ([]string, error)
+}
 
-	TestDependencies() ([]string, error)
+type Muted interface {
+	MuteTest() bool
 }
 
 // FullTester serves as a holder for the individual artifact-specific
 // testers. It exists so that the Tester interface can mimic the Builder/Deployer
-// interface, so it can be called in a similar fashion from the Runner, while
+// interface, so it can be called in a similar fashion from the runner, while
 // the FullTester actually handles the work.
 
 // FullTester should always be the ONLY implementation of the Tester interface;
-// newly added testing implementations should implement the Runner interface.
+// newly added testing implementations should implement the imageTester interface.
 type FullTester struct {
-	testCases      []*latest.TestCase
-	localDaemon    docker.LocalDaemon
-	workingDir     string
-	imagesAreLocal bool
+	Testers ImageTesters
+	muted   Muted
+	// imagesAreLocal func(imageName string) (bool, error)
 }
 
-// Runner is the lowest-level test executor in Skaffold, responsible for
+// ImageTester is the lowest-level test executor in Skaffold, responsible for
 // running a single test on a single artifact image and returning its result.
 // Any new test type should implement this interface.
-type Runner interface {
-	Test(ctx context.Context, out io.Writer, image string) error
+type ImageTester interface {
+	Test(ctx context.Context, out io.Writer, tag string) error
+
+	TestDependencies(ctx context.Context) ([]string, error)
 }
+
+// ImageTesters is a collection of imageTester interfaces grouped by the target image name
+type ImageTesters map[string][]ImageTester

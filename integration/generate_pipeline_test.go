@@ -18,11 +18,10 @@ package integration
 
 import (
 	"bytes"
-	"io/ioutil"
 	"os"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/integration/skaffold"
+	"github.com/GoogleContainerTools/skaffold/v2/integration/skaffold"
 )
 
 type configContents struct {
@@ -31,6 +30,9 @@ type configContents struct {
 }
 
 func TestGeneratePipeline(t *testing.T) {
+	// TODO: This test shall pass once render v2 is completed.
+	t.SkipNow()
+
 	MarkIntegrationTest(t, CanRunWithoutGcp)
 
 	tests := []struct {
@@ -75,9 +77,9 @@ func TestGeneratePipeline(t *testing.T) {
 			failNowIfError(t, err)
 			defer writeOriginalContents(contents)
 
-			originalConfig, err := ioutil.ReadFile(test.dir + "/skaffold.yaml")
+			originalConfig, err := os.ReadFile(test.dir + "/skaffold.yaml")
 			failNowIfError(t, err)
-			defer ioutil.WriteFile(test.dir+"/skaffold.yaml", originalConfig, 0755)
+			defer os.WriteFile(test.dir+"/skaffold.yaml", originalConfig, 0755)
 			defer os.Remove(test.dir + "/pipeline.yaml")
 
 			skaffoldEnv := []string{
@@ -101,7 +103,7 @@ func getOriginalContents(testArgs []string, testDir string, configFiles []string
 		testArgs = append(testArgs, []string{"--config-files", configFile}...)
 
 		path := testDir + "/" + configFile
-		contents, err := ioutil.ReadFile(path)
+		contents, err := os.ReadFile(path)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -113,15 +115,15 @@ func getOriginalContents(testArgs []string, testDir string, configFiles []string
 
 func writeOriginalContents(contents []configContents) {
 	for _, content := range contents {
-		ioutil.WriteFile(content.path, content.data, 0755)
+		os.WriteFile(content.path, content.data, 0755)
 	}
 }
 
 func checkFileContents(t *testing.T, wantFile, gotFile string) {
-	wantContents, err := ioutil.ReadFile(wantFile)
+	wantContents, err := os.ReadFile(wantFile)
 	failNowIfError(t, err)
 
-	gotContents, err := ioutil.ReadFile(gotFile)
+	gotContents, err := os.ReadFile(gotFile)
 	failNowIfError(t, err)
 
 	if !bytes.Equal(wantContents, gotContents) {

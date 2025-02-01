@@ -17,45 +17,35 @@ limitations under the License.
 package errors
 
 import (
-	"fmt"
+	"errors"
 	"strings"
-	"sync"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/proto"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/constants"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/instrumentation"
+	"github.com/GoogleContainerTools/skaffold/v2/proto/v1"
+	protoV2 "github.com/GoogleContainerTools/skaffold/v2/proto/v2"
 )
 
-// These are phases in a DevLoop
 const (
-	Build       = Phase("Build")
-	Deploy      = Phase("Deploy")
-	StatusCheck = Phase("StatusCheck")
-	FileSync    = Phase("FileSync")
-	DevInit     = Phase("DevInit")
-	Cleanup     = Phase("Cleanup")
+	// Report issue text
+	reportIssueText = "If above error is unexpected, please open an issue to report this error at " + constants.GithubIssueLink
+
+	// PushImageErr is the error prepended.
+	PushImageErr = "could not push image"
 )
 
 var (
-	// ErrNoSuggestionFound error not found
-	ErrNoSuggestionFound = fmt.Errorf("no suggestions found")
-
-	setOptionsOnce sync.Once
-	skaffoldOpts   config.SkaffoldOptions
+	ReportIssueSuggestion = func(interface{}) []*proto.Suggestion {
+		return []*proto.Suggestion{{
+			SuggestionCode: proto.SuggestionCode_OPEN_ISSUE,
+			Action:         reportIssueText,
+		}}
+	}
 )
 
-type Phase string
-
-// SetSkaffoldOptions set Skaffold config options once. These options are used later to
-// suggest actionable error messages based on skaffold run context
-func SetSkaffoldOptions(opts config.SkaffoldOptions) {
-	setOptionsOnce.Do(func() {
-		skaffoldOpts = opts
-	})
-}
-
 // ActionableErr returns an actionable error message with suggestions
-func ActionableErr(phase Phase, err error) *proto.ActionableErr {
-	errCode, suggestions := getErrorCodeFromError(phase, err)
+func ActionableErr(cfg interface{}, phase constants.Phase, err error) *proto.ActionableErr {
+	errCode, suggestions := getErrorCodeFromError(cfg, phase, err)
 	return &proto.ActionableErr{
 		ErrCode:     errCode,
 		Message:     err.Error(),
@@ -63,38 +53,79 @@ func ActionableErr(phase Phase, err error) *proto.ActionableErr {
 	}
 }
 
-func ShowAIError(err error) error {
-	for _, v := range knownBuildProblems {
-		if v.regexp.MatchString(err.Error()) {
-			if suggestions := v.suggestion(skaffoldOpts); suggestions != nil {
-				return fmt.Errorf("%s. %s", v.description, concatSuggestions(suggestions))
-			}
-		}
+// ActionableErrV2 returns an actionable error message with suggestions
+func ActionableErrV2(cfg interface{}, phase constants.Phase, err error) *protoV2.ActionableErr {
+	errCode, suggestions := getErrorCodeFromError(cfg, phase, err)
+	suggestionsV2 := make([]*protoV2.Suggestion, len(suggestions))
+	for i, suggestion := range suggestions {
+		var suggestions2 protoV2.Suggestion
+		suggestions2.Action = suggestion.Action
+		suggestions2.SuggestionCode = suggestion.SuggestionCode
+		suggestions2.Action = suggestion.Action
+		suggestionsV2[i] = &suggestions2
 	}
-	return ErrNoSuggestionFound
+	return &protoV2.ActionableErr{
+		ErrCode:     errCode,
+		Message:     err.Error(),
+		Suggestions: suggestionsV2,
+	}
 }
 
-func getErrorCodeFromError(phase Phase, err error) (proto.StatusCode, []*proto.Suggestion) {
-	switch phase {
-	case Build:
-		for _, v := range knownBuildProblems {
-			if v.regexp.MatchString(err.Error()) {
-				return v.errCode, v.suggestion(skaffoldOpts)
+func V2fromV1(ae *proto.ActionableErr) *protoV2.ActionableErr {
+	suggestionsV2 := make([]*protoV2.Suggestion, len(ae.Suggestions))
+	for i, suggestion := range ae.Suggestions {
+		var suggestions2 protoV2.Suggestion
+		suggestions2.Action = suggestion.Action
+		suggestions2.SuggestionCode = suggestion.SuggestionCode
+		suggestions2.Action = suggestion.Action
+		suggestionsV2[i] = &suggestions2
+	}
+	return &protoV2.ActionableErr{
+		ErrCode:     ae.ErrCode,
+		Message:     ae.Message,
+		Suggestions: suggestionsV2,
+	}
+}
+
+func ShowAIError(cfg interface{}, err error) error {
+	if uErr := errors.Unwrap(err); uErr != nil {
+		err = uErr
+	}
+	if IsSkaffoldErr(err) {
+		instrumentation.SetErrorCode(err.(Error).StatusCode())
+		return err
+	}
+
+	if p, ok := isProblem(err); ok {
+		instrumentation.SetErrorCode(p.ErrCode)
+		return p.AIError(cfg, err)
+	}
+
+	for _, problems := range GetProblemCatalogCopy().allErrors {
+		for _, p := range problems {
+			if p.Regexp.MatchString(err.Error()) {
+				instrumentation.SetErrorCode(p.ErrCode)
+				return p.AIError(cfg, err)
 			}
 		}
-		return proto.StatusCode_BUILD_UNKNOWN, nil
-	case Deploy:
-		return proto.StatusCode_DEPLOY_UNKNOWN, nil
-	case StatusCheck:
-		return proto.StatusCode_STATUSCHECK_UNKNOWN, nil
-	case FileSync:
-		return proto.StatusCode_SYNC_UNKNOWN, nil
-	case DevInit:
-		return proto.StatusCode_DEVINIT_UNKNOWN, nil
-	case Cleanup:
-		return proto.StatusCode_CLEANUP_UNKNOWN, nil
 	}
-	return proto.StatusCode_UNKNOWN_ERROR, nil
+	return err
+}
+
+func getErrorCodeFromError(cfg interface{}, phase constants.Phase, err error) (proto.StatusCode, []*proto.Suggestion) {
+	var sErr Error
+	if errors.As(err, &sErr) {
+		return sErr.StatusCode(), sErr.Suggestions()
+	}
+
+	if problems, ok := GetProblemCatalogCopy().allErrors[phase]; ok {
+		for _, p := range problems {
+			if p.Regexp.MatchString(err.Error()) {
+				return p.ErrCode, p.Suggestion(cfg)
+			}
+		}
+	}
+	return unknownErrForPhase(phase), ReportIssueSuggestion(cfg)
 }
 
 func concatSuggestions(suggestions []*proto.Suggestion) string {
@@ -105,6 +136,32 @@ func concatSuggestions(suggestions []*proto.Suggestion) string {
 		}
 		s.WriteString(suggestion.Action)
 	}
+	if s.String() == "" {
+		return ""
+	}
 	s.WriteString(".")
 	return s.String()
+}
+
+func unknownErrForPhase(phase constants.Phase) proto.StatusCode {
+	switch phase {
+	case constants.Build:
+		return proto.StatusCode_BUILD_UNKNOWN
+	case constants.Init:
+		return proto.StatusCode_INIT_UNKNOWN
+	case constants.Test:
+		return proto.StatusCode_TEST_UNKNOWN
+	case constants.Deploy:
+		return proto.StatusCode_DEPLOY_UNKNOWN
+	case constants.StatusCheck:
+		return proto.StatusCode_STATUSCHECK_UNKNOWN
+	case constants.Sync:
+		return proto.StatusCode_SYNC_UNKNOWN
+	case constants.DevInit:
+		return proto.StatusCode_DEVINIT_UNKNOWN
+	case constants.Cleanup:
+		return proto.StatusCode_CLEANUP_UNKNOWN
+	default:
+		return proto.StatusCode_UNKNOWN_ERROR
+	}
 }

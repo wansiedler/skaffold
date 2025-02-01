@@ -17,12 +17,13 @@ limitations under the License.
 package docker
 
 import (
+	"context"
 	"path/filepath"
 	"sort"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 const copySubdirectory = `
@@ -291,28 +292,28 @@ func TestSyncMap(t *testing.T) {
 			description: "build args",
 			dockerfile:  copyServerGoBuildArg,
 			workspace:   ".",
-			buildArgs:   map[string]*string{"FOO": util.StringPtr("server.go")},
+			buildArgs:   map[string]*string{"FOO": util.Ptr("server.go")},
 			expected:    map[string][]string{"server.go": {"/server.go"}},
 		},
 		{
 			description: "build args with same prefix",
 			dockerfile:  copyWorkerGoBuildArgSamePrefix,
 			workspace:   ".",
-			buildArgs:   map[string]*string{"FOO2": util.StringPtr("worker.go")},
+			buildArgs:   map[string]*string{"FOO2": util.Ptr("worker.go")},
 			expected:    map[string][]string{"worker.go": {"/worker.go"}},
 		},
 		{
 			description: "build args with curly braces",
 			dockerfile:  copyServerGoBuildArgCurlyBraces,
 			workspace:   ".",
-			buildArgs:   map[string]*string{"FOO": util.StringPtr("server.go")},
+			buildArgs:   map[string]*string{"FOO": util.Ptr("server.go")},
 			expected:    map[string][]string{"server.go": {"/server.go"}},
 		},
 		{
 			description: "build args with extra whitespace",
 			dockerfile:  copyServerGoBuildArgExtraWhitespace,
 			workspace:   ".",
-			buildArgs:   map[string]*string{"FOO": util.StringPtr("server.go")},
+			buildArgs:   map[string]*string{"FOO": util.Ptr("server.go")},
 			expected:    map[string][]string{"server.go": {"/server.go"}},
 		},
 		{
@@ -337,7 +338,7 @@ func TestSyncMap(t *testing.T) {
 			description: "override default build arg",
 			dockerfile:  copyServerGoBuildArgDefaultValue,
 			workspace:   ".",
-			buildArgs:   map[string]*string{"FOO": util.StringPtr("worker.go")},
+			buildArgs:   map[string]*string{"FOO": util.Ptr("worker.go")},
 			expected:    map[string][]string{"worker.go": {"/worker.go"}},
 		},
 		{
@@ -408,7 +409,7 @@ func TestSyncMap(t *testing.T) {
 			}
 
 			workspace := tmpDir.Path(test.workspace)
-			deps, err := SyncMap(workspace, "Dockerfile", test.buildArgs, nil)
+			deps, err := SyncMap(context.Background(), workspace, "Dockerfile", test.buildArgs, nil)
 
 			// destinations are not sorted, but for the test assertion they must be
 			for _, dsts := range deps {
@@ -505,7 +506,7 @@ ADD * .
 				Write("Dockerfile", test.dockerfile)
 
 			for i := 0; i < repeat; i++ {
-				deps, err := SyncMap(tmpDir.Root(), "Dockerfile", nil, nil)
+				deps, err := SyncMap(context.Background(), tmpDir.Root(), "Dockerfile", nil, nil)
 
 				// destinations are not sorted, but for the test assertion they must be
 				for _, dsts := range deps {

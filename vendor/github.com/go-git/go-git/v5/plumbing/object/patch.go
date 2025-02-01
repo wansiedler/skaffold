@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
+	"strconv"
 	"strings"
 
 	"github.com/go-git/go-git/v5/plumbing"
@@ -96,10 +96,6 @@ func filePatchWithContext(ctx context.Context, c *Change) (fdiff.FilePatch, erro
 
 }
 
-func filePatch(c *Change) (fdiff.FilePatch, error) {
-	return filePatchWithContext(context.Background(), c)
-}
-
 func fileContent(f *File) (content string, isBinary bool, err error) {
 	if f == nil {
 		return
@@ -115,18 +111,18 @@ func fileContent(f *File) (content string, isBinary bool, err error) {
 	return
 }
 
-// textPatch is an implementation of fdiff.Patch interface
+// Patch is an implementation of fdiff.Patch interface
 type Patch struct {
 	message     string
 	filePatches []fdiff.FilePatch
 }
 
-func (t *Patch) FilePatches() []fdiff.FilePatch {
-	return t.filePatches
+func (p *Patch) FilePatches() []fdiff.FilePatch {
+	return p.filePatches
 }
 
-func (t *Patch) Message() string {
-	return t.message
+func (p *Patch) Message() string {
+	return p.message
 }
 
 func (p *Patch) Encode(w io.Writer) error {
@@ -198,12 +194,12 @@ func (tf *textFilePatch) Files() (from fdiff.File, to fdiff.File) {
 	return
 }
 
-func (t *textFilePatch) IsBinary() bool {
-	return len(t.chunks) == 0
+func (tf *textFilePatch) IsBinary() bool {
+	return len(tf.chunks) == 0
 }
 
-func (t *textFilePatch) Chunks() []fdiff.Chunk {
-	return t.chunks
+func (tf *textFilePatch) Chunks() []fdiff.Chunk {
+	return tf.chunks
 }
 
 // textChunk is an implementation of fdiff.Chunk interface
@@ -238,61 +234,56 @@ func (fileStats FileStats) String() string {
 	return printStat(fileStats)
 }
 
+// printStat prints the stats of changes in content of files.
+// Original implementation: https://github.com/git/git/blob/1a87c842ece327d03d08096395969aca5e0a6996/diff.c#L2615
+// Parts of the output:
+// <pad><filename><pad>|<pad><changeNumber><pad><+++/---><newline>
+// example: " main.go | 10 +++++++--- "
 func printStat(fileStats []FileStat) string {
-	padLength := float64(len(" "))
-	newlineLength := float64(len("\n"))
-	separatorLength := float64(len("|"))
-	// Soft line length limit. The text length calculation below excludes
-	// length of the change number. Adding that would take it closer to 80,
-	// but probably not more than 80, until it's a huge number.
-	lineLength := 72.0
+	maxGraphWidth := uint(53)
+	maxNameLen := 0
+	maxChangeLen := 0
 
-	// Get the longest filename and longest total change.
-	var longestLength float64
-	var longestTotalChange float64
-	for _, fs := range fileStats {
-		if int(longestLength) < len(fs.Name) {
-			longestLength = float64(len(fs.Name))
+	scaleLinear := func(it, width, max uint) uint {
+		if it == 0 || max == 0 {
+			return 0
 		}
-		totalChange := fs.Addition + fs.Deletion
-		if int(longestTotalChange) < totalChange {
-			longestTotalChange = float64(totalChange)
+
+		return 1 + (it * (width - 1) / max)
+	}
+
+	for _, fs := range fileStats {
+		if len(fs.Name) > maxNameLen {
+			maxNameLen = len(fs.Name)
+		}
+
+		changes := strconv.Itoa(fs.Addition + fs.Deletion)
+		if len(changes) > maxChangeLen {
+			maxChangeLen = len(changes)
 		}
 	}
 
-	// Parts of the output:
-	// <pad><filename><pad>|<pad><changeNumber><pad><+++/---><newline>
-	// example: " main.go | 10 +++++++--- "
-
-	// <pad><filename><pad>
-	leftTextLength := padLength + longestLength + padLength
-
-	// <pad><number><pad><+++++/-----><newline>
-	// Excluding number length here.
-	rightTextLength := padLength + padLength + newlineLength
-
-	totalTextArea := leftTextLength + separatorLength + rightTextLength
-	heightOfHistogram := lineLength - totalTextArea
-
-	// Scale the histogram.
-	var scaleFactor float64
-	if longestTotalChange > heightOfHistogram {
-		// Scale down to heightOfHistogram.
-		scaleFactor = longestTotalChange / heightOfHistogram
-	} else {
-		scaleFactor = 1.0
-	}
-
-	finalOutput := ""
+	result := ""
 	for _, fs := range fileStats {
-		addn := float64(fs.Addition)
-		deln := float64(fs.Deletion)
-		adds := strings.Repeat("+", int(math.Floor(addn/scaleFactor)))
-		dels := strings.Repeat("-", int(math.Floor(deln/scaleFactor)))
-		finalOutput += fmt.Sprintf(" %s | %d %s%s\n", fs.Name, (fs.Addition + fs.Deletion), adds, dels)
-	}
+		add := uint(fs.Addition)
+		del := uint(fs.Deletion)
+		np := maxNameLen - len(fs.Name)
+		cp := maxChangeLen - len(strconv.Itoa(fs.Addition+fs.Deletion))
 
-	return finalOutput
+		total := add + del
+		if total > maxGraphWidth {
+			add = scaleLinear(add, maxGraphWidth, total)
+			del = scaleLinear(del, maxGraphWidth, total)
+		}
+
+		adds := strings.Repeat("+", int(add))
+		dels := strings.Repeat("-", int(del))
+		namePad := strings.Repeat(" ", np)
+		changePad := strings.Repeat(" ", cp)
+
+		result += fmt.Sprintf(" %s%s | %s%d %s%s\n", fs.Name, namePad, changePad, total, adds, dels)
+	}
+	return result
 }
 
 func getFileStatsFromFilePatches(filePatches []fdiff.FilePatch) FileStats {
@@ -313,8 +304,8 @@ func getFileStatsFromFilePatches(filePatches []fdiff.FilePatch) FileStats {
 			// File is deleted.
 			cs.Name = from.Path()
 		} else if from.Path() != to.Path() {
-			// File is renamed. Not supported.
-			// cs.Name = fmt.Sprintf("%s => %s", from.Path(), to.Path())
+			// File is renamed.
+			cs.Name = fmt.Sprintf("%s => %s", from.Path(), to.Path())
 		} else {
 			cs.Name = from.Path()
 		}

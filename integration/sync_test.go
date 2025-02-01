@@ -19,55 +19,69 @@ package integration
 import (
 	"bufio"
 	"context"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	yamlpatch "github.com/krishicks/yaml-patch"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	"github.com/GoogleContainerTools/skaffold/integration/skaffold"
-	"github.com/GoogleContainerTools/skaffold/proto"
+	"github.com/GoogleContainerTools/skaffold/v2/integration/skaffold"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/constants"
+	event "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/event/v2"
+	"github.com/GoogleContainerTools/skaffold/v2/proto/v1"
+	V2proto "github.com/GoogleContainerTools/skaffold/v2/proto/v2"
 )
 
-func TestDevSync(t *testing.T) {
-	MarkIntegrationTest(t, CanRunWithoutGcp)
+// TODO: remove nolint once we've reenabled integration tests
+//
+//nolint:golint,unused
+var syncTests = []struct {
+	description string
+	trigger     string
+	config      string
+}{
+	{
+		description: "manual sync with polling trigger",
+		trigger:     "polling",
+		config:      "skaffold-manual.yaml",
+	},
+	{
+		description: "manual sync with notify trigger",
+		trigger:     "notify",
+		config:      "skaffold-manual.yaml",
+	},
+	{
+		description: "inferred sync with notify trigger",
+		trigger:     "notify",
+		config:      "skaffold-infer.yaml",
+	},
+}
 
-	tests := []struct {
-		description string
-		trigger     string
-		config      string
-	}{
-		{
-			description: "manual sync with polling trigger",
-			trigger:     "polling",
-			config:      "skaffold-manual.yaml",
-		},
-		{
-			description: "manual sync with notify trigger",
-			trigger:     "notify",
-			config:      "skaffold-manual.yaml",
-		},
-		{
-			description: "inferred sync with notify trigger",
-			trigger:     "notify",
-			config:      "skaffold-infer.yaml",
-		},
-	}
-	for _, test := range tests {
+func TestDevSync(t *testing.T) {
+	for _, test := range syncTests {
 		t.Run(test.description, func(t *testing.T) {
-			// Run skaffold build first to fail quickly on a build failure
-			skaffold.Build().InDir("testdata/file-sync").WithConfig(test.config).RunOrFail(t)
+			MarkIntegrationTest(t, CanRunWithoutGcp)
 
 			ns, client := SetupNamespace(t)
 
-			skaffold.Dev("--trigger", test.trigger).InDir("testdata/file-sync").WithConfig(test.config).InNs(ns.Name).RunBackground(t)
+			rpcAddr := randomPort()
+
+			skaffold.Dev("--rpc-port", rpcAddr, "--trigger", test.trigger).InDir("testdata/file-sync").WithConfig(test.config).InNs(ns.Name).RunBackground(t)
 
 			client.WaitForPodsReady("test-file-sync")
 
-			ioutil.WriteFile("testdata/file-sync/foo", []byte("foo"), 0644)
+			_, entries := v2apiEvents(t, rpcAddr)
+
+			failNowIfError(t, waitForV2Event(90*time.Second, entries, func(e *V2proto.Event) bool {
+				taskEvent, ok := e.EventType.(*V2proto.Event_TaskEvent)
+				return ok && taskEvent.TaskEvent.Task == string(constants.DevLoop) && taskEvent.TaskEvent.Status == event.Succeeded
+			}))
+
+			os.WriteFile("testdata/file-sync/foo", []byte("foo"), 0644)
 			defer func() { os.Truncate("testdata/file-sync/foo", 0) }()
 
 			err := wait.PollImmediate(time.Millisecond*500, 1*time.Minute, func() (bool, error) {
@@ -79,9 +93,62 @@ func TestDevSync(t *testing.T) {
 	}
 }
 
-func TestDevAutoSync(t *testing.T) {
-	MarkIntegrationTest(t, CanRunWithoutGcp)
+func TestDevSyncDefaultNamespace(t *testing.T) {
+	for _, test := range syncTests {
+		t.Run(test.description, func(t *testing.T) {
+			MarkIntegrationTest(t, CanRunWithoutGcp)
+			manifest, err := os.ReadFile("testdata/file-sync/pod.yaml")
+			defer os.WriteFile("testdata/file-sync/pod.yaml", manifest, 0644)
+			if err != nil {
+				t.Fatal("Failed to read from file-sync/pod.yaml file.")
+			}
+			id := "test-file-sync-" + uuid.New().String()
+			ops := []byte(
+				`---
+- op: replace
+  path: /metadata/name
+  value: ` + id)
 
+			patch, err := yamlpatch.DecodePatch(ops)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			nm, err := patch.Apply(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			os.WriteFile("testdata/file-sync/pod.yaml", nm, 0644)
+
+			_, client := DefaultNamespace(t)
+
+			rpcAddr := randomPort()
+
+			skaffold.Dev("--rpc-port", rpcAddr, "--trigger", test.trigger).InDir("testdata/file-sync").WithConfig(test.config).RunBackground(t)
+
+			defer skaffold.Delete().InDir("testdata/file-sync").WithConfig(test.config).Run(t)
+
+			client.WaitForPodsReady(id)
+
+			_, entries := v2apiEvents(t, rpcAddr)
+			failNowIfError(t, waitForV2Event(90*time.Second, entries, func(e *V2proto.Event) bool {
+				taskEvent, ok := e.EventType.(*V2proto.Event_TaskEvent)
+				return ok && taskEvent.TaskEvent.Task == string(constants.DevLoop) && taskEvent.TaskEvent.Status == event.Succeeded
+			}))
+
+			os.WriteFile("testdata/file-sync/foo", []byte("foo"), 0644)
+			defer func() { os.Truncate("testdata/file-sync/foo", 0) }()
+
+			err = wait.PollImmediate(time.Millisecond*500, 1*time.Minute, func() (bool, error) {
+				out, _ := exec.Command("kubectl", "exec", id, "--", "cat", "foo").Output()
+				return string(out) == "foo", nil
+			})
+			failNowIfError(t, err)
+		})
+	}
+}
+
+func TestDevAutoSync(t *testing.T) {
 	dir := "examples/jib-sync/"
 
 	tests := []struct {
@@ -103,12 +170,12 @@ func TestDevAutoSync(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.description, func(t *testing.T) {
-			// Run skaffold build first to fail quickly on a build failure
-			skaffold.Build().WithConfig(test.configFile).InDir(dir).RunOrFail(t)
+			MarkIntegrationTest(t, CanRunWithoutGcp)
 
 			ns, client := SetupNamespace(t)
 
-			output := skaffold.Dev("--trigger", "notify").WithConfig(test.configFile).InDir(dir).InNs(ns.Name).RunBackground(t)
+			rpcAddr := randomPort()
+			output := skaffold.Dev("--trigger", "notify", "--rpc-port", rpcAddr).WithConfig(test.configFile).InDir(dir).InNs(ns.Name).RunLive(t)
 
 			client.WaitForPodsReady("test-file-sync")
 
@@ -127,11 +194,18 @@ func TestDevAutoSync(t *testing.T) {
 				}
 			}
 
+			_, entries := v2apiEvents(t, rpcAddr)
+
+			failNowIfError(t, waitForV2Event(90*time.Second, entries, func(e *V2proto.Event) bool {
+				taskEvent, ok := e.EventType.(*V2proto.Event_TaskEvent)
+				return ok && taskEvent.TaskEvent.Task == string(constants.DevLoop) && taskEvent.TaskEvent.Status == event.Succeeded
+			}))
+
 			// direct file sync (this file is an existing file checked in for this testdata)
 			directFile := "direct-file"
 			directFilePath := dir + "src/main/jib/" + directFile
 			directFileData := "direct-data"
-			if err := ioutil.WriteFile(directFilePath, []byte(directFileData), 0644); err != nil {
+			if err := os.WriteFile(directFilePath, []byte(directFileData), 0644); err != nil {
 				t.Fatalf("Failed to write local file to sync %s", directFilePath)
 			}
 			defer func() { os.Truncate(directFilePath, 0) }()
@@ -144,15 +218,15 @@ func TestDevAutoSync(t *testing.T) {
 
 			// compile and sync
 			generatedFileSrc := dir + "src/main/java/hello/HelloController.java"
-			if oldContents, err := ioutil.ReadFile(generatedFileSrc); err != nil {
+			if oldContents, err := os.ReadFile(generatedFileSrc); err != nil {
 				t.Fatalf("Failed to read file %s", generatedFileSrc)
 			} else {
 				newContents := strings.Replace(string(oldContents), "text-to-replace", test.uniqueStr, 1)
-				if err := ioutil.WriteFile(generatedFileSrc, []byte(newContents), 0644); err != nil {
+				if err := os.WriteFile(generatedFileSrc, []byte(newContents), 0644); err != nil {
 					t.Fatalf("Failed to write new contents to file %s", generatedFileSrc)
 				}
 				defer func() {
-					ioutil.WriteFile(generatedFileSrc, oldContents, 0644)
+					os.WriteFile(generatedFileSrc, oldContents, 0644)
 				}()
 			}
 			err = wait.PollImmediate(time.Millisecond*500, 1*time.Minute, func() (bool, error) {
@@ -176,15 +250,13 @@ func TestDevSyncAPITrigger(t *testing.T) {
 	skaffold.Dev("--auto-sync=false", "--rpc-port", rpcAddr).InDir("testdata/file-sync").WithConfig("skaffold-manual.yaml").InNs(ns.Name).RunBackground(t)
 
 	rpcClient, entries := apiEvents(t, rpcAddr)
-
-	// throw away first 5 entries of log (from first run of dev loop)
-	for i := 0; i < 5; i++ {
-		<-entries
-	}
-
 	client.WaitForPodsReady("test-file-sync")
+	failNowIfError(t, waitForEvent(90*time.Second, entries, func(e *proto.LogEntry) bool {
+		dle, ok := e.Event.EventType.(*proto.Event_DevLoopEvent)
+		return ok && dle.DevLoopEvent.Status == event.Succeeded
+	}))
 
-	ioutil.WriteFile("testdata/file-sync/foo", []byte("foo"), 0644)
+	os.WriteFile("testdata/file-sync/foo", []byte("foo"), 0644)
 	defer func() { os.Truncate("testdata/file-sync/foo", 0) }()
 
 	rpcClient.Execute(context.Background(), &proto.UserIntentRequest{
@@ -197,9 +269,7 @@ func TestDevSyncAPITrigger(t *testing.T) {
 }
 
 func TestDevAutoSyncAPITrigger(t *testing.T) {
-	if testing.Short() || RunOnGCP() {
-		t.Skip("skipping kind integration test")
-	}
+	MarkIntegrationTest(t, CanRunWithoutGcp)
 
 	ns, client := SetupNamespace(t)
 
@@ -216,7 +286,12 @@ func TestDevAutoSyncAPITrigger(t *testing.T) {
 
 	client.WaitForPodsReady("test-file-sync")
 
-	ioutil.WriteFile("testdata/file-sync/foo", []byte("foo"), 0644)
+	failNowIfError(t, waitForEvent(90*time.Second, entries, func(e *proto.LogEntry) bool {
+		dle, ok := e.Event.EventType.(*proto.Event_DevLoopEvent)
+		return ok && dle.DevLoopEvent.Status == event.Succeeded
+	}))
+
+	os.WriteFile("testdata/file-sync/foo", []byte("foo"), 0644)
 	defer func() { os.Truncate("testdata/file-sync/foo", 0) }()
 
 	rpcClient.AutoSync(context.Background(), &proto.TriggerRequest{
@@ -229,7 +304,7 @@ func TestDevAutoSyncAPITrigger(t *testing.T) {
 
 	verifySyncCompletedWithEvents(t, entries, ns.Name, "foo")
 
-	ioutil.WriteFile("testdata/file-sync/foo", []byte("bar"), 0644)
+	os.WriteFile("testdata/file-sync/foo", []byte("bar"), 0644)
 	defer func() { os.Truncate("testdata/file-sync/foo", 0) }()
 
 	verifySyncCompletedWithEvents(t, entries, ns.Name, "bar")
@@ -245,10 +320,9 @@ func TestDevAutoSyncAPITrigger(t *testing.T) {
 
 func verifySyncCompletedWithEvents(t *testing.T, entries chan *proto.LogEntry, namespace string, fileContent string) {
 	// Ensure we see a file sync in progress triggered in the event log
-	err := wait.Poll(time.Millisecond*500, 2*time.Minute, func() (bool, error) {
-		e := <-entries
+	err := waitForEvent(2*time.Minute, entries, func(e *proto.LogEntry) bool {
 		event := e.GetEvent().GetFileSyncEvent()
-		return event != nil && event.GetStatus() == "In Progress", nil
+		return event != nil && event.GetStatus() == InProgress
 	})
 	failNowIfError(t, err)
 
@@ -259,10 +333,9 @@ func verifySyncCompletedWithEvents(t *testing.T, entries chan *proto.LogEntry, n
 	failNowIfError(t, err)
 
 	// Ensure we see a file sync succeeded triggered in the event log
-	err = wait.Poll(time.Millisecond*500, 2*time.Minute, func() (bool, error) {
-		e := <-entries
+	err = waitForEvent(2*time.Minute, entries, func(e *proto.LogEntry) bool {
 		event := e.GetEvent().GetFileSyncEvent()
-		return event != nil && event.GetStatus() == "Succeeded", nil
+		return event != nil && event.GetStatus() == "Succeeded"
 	})
 	failNowIfError(t, err)
 }

@@ -19,7 +19,7 @@ package v2alpha1
 import (
 	v1 "k8s.io/api/core/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
 )
 
 // !!! WARNING !!! This config version is already released, please DO NOT MODIFY the structs in this file.
@@ -194,8 +194,8 @@ type LocalBuild struct {
 	// UseDockerCLI use `docker` command-line interface instead of Docker Engine APIs.
 	UseDockerCLI bool `yaml:"useDockerCLI,omitempty"`
 
-	// UseBuildkit use BuildKit to build Docker images.
-	UseBuildkit bool `yaml:"useBuildkit,omitempty"`
+	// UseBuildkit use BuildKit to build Docker images. If unspecified, uses the Docker default.
+	UseBuildkit *bool `yaml:"useBuildkit,omitempty"`
 }
 
 // GoogleCloudBuild *beta* describes how to do a remote build on

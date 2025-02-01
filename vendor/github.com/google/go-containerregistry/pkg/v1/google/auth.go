@@ -19,7 +19,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"time"
 
@@ -32,7 +31,7 @@ import (
 const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
 
 // GetGcloudCmd is exposed so we can test this.
-var GetGcloudCmd = func() *exec.Cmd {
+var GetGcloudCmd = func(ctx context.Context) *exec.Cmd {
 	// This is odd, but basically what docker-credential-gcr does.
 	//
 	// config-helper is undocumented, but it's purportedly the only supported way
@@ -40,32 +39,37 @@ var GetGcloudCmd = func() *exec.Cmd {
 	//
 	// --force-auth-refresh means we are getting a token that is valid for about
 	// an hour (we reuse it until it's expired).
-	return exec.Command("gcloud", "config", "config-helper", "--force-auth-refresh", "--format=json(credential)")
+	return exec.CommandContext(ctx, "gcloud", "config", "config-helper", "--force-auth-refresh", "--format=json(credential)")
 }
 
 // NewEnvAuthenticator returns an authn.Authenticator that generates access
 // tokens from the environment we're running in.
 //
 // See: https://godoc.org/golang.org/x/oauth2/google#FindDefaultCredentials
-func NewEnvAuthenticator() (authn.Authenticator, error) {
-	ts, err := googauth.DefaultTokenSource(context.Background(), cloudPlatformScope)
+func NewEnvAuthenticator(ctx context.Context) (authn.Authenticator, error) {
+	ts, err := googauth.DefaultTokenSource(ctx, cloudPlatformScope)
 	if err != nil {
 		return nil, err
 	}
 
-	return &tokenSourceAuth{oauth2.ReuseTokenSource(nil, ts)}, nil
+	token, err := ts.Token()
+	if err != nil {
+		return nil, err
+	}
+
+	return &tokenSourceAuth{oauth2.ReuseTokenSource(token, ts)}, nil
 }
 
 // NewGcloudAuthenticator returns an oauth2.TokenSource that generates access
 // tokens by shelling out to the gcloud sdk.
-func NewGcloudAuthenticator() (authn.Authenticator, error) {
+func NewGcloudAuthenticator(ctx context.Context) (authn.Authenticator, error) {
 	if _, err := exec.LookPath("gcloud"); err != nil {
 		// gcloud is not available, fall back to anonymous
 		logs.Warn.Println("gcloud binary not found")
 		return authn.Anonymous, nil
 	}
 
-	ts := gcloudSource{GetGcloudCmd()}
+	ts := gcloudSource{ctx, GetGcloudCmd}
 
 	// Attempt to fetch a token to ensure gcloud is installed and we can run it.
 	token, err := ts.Token()
@@ -90,12 +94,17 @@ func NewJSONKeyAuthenticator(serviceAccountJSON string) authn.Authenticator {
 // tokens by using the Google SDK to produce JWT tokens from a Service Account.
 // More information: https://godoc.org/golang.org/x/oauth2/google#JWTAccessTokenSourceFromJSON
 func NewTokenAuthenticator(serviceAccountJSON string, scope string) (authn.Authenticator, error) {
-	ts, err := googauth.JWTAccessTokenSourceFromJSON([]byte(serviceAccountJSON), string(scope))
+	ts, err := googauth.JWTAccessTokenSourceFromJSON([]byte(serviceAccountJSON), scope)
 	if err != nil {
 		return nil, err
 	}
 
 	return &tokenSourceAuth{oauth2.ReuseTokenSource(nil, ts)}, nil
+}
+
+// NewTokenSourceAuthenticator converts an oauth2.TokenSource into an authn.Authenticator.
+func NewTokenSourceAuthenticator(ts oauth2.TokenSource) authn.Authenticator {
+	return &tokenSourceAuth{ts}
 }
 
 // tokenSourceAuth turns an oauth2.TokenSource into an authn.Authenticator.
@@ -110,15 +119,9 @@ func (tsa *tokenSourceAuth) Authorization() (*authn.AuthConfig, error) {
 		return nil, err
 	}
 
-	if logs.Enabled(logs.Debug) {
-		b, err := json.Marshal(token)
-		if err == nil {
-			logs.Debug.Printf("google.Keychain: %s", string(b))
-		}
-	}
-
 	return &authn.AuthConfig{
-		RegistryToken: token.AccessToken,
+		Username: "_token",
+		Password: token.AccessToken,
 	}, nil
 }
 
@@ -126,12 +129,12 @@ func (tsa *tokenSourceAuth) Authorization() (*authn.AuthConfig, error) {
 //
 // `gcloud config config-helper --format=json(credential)` looks something like:
 //
-// {
-//   "credential": {
-//     "access_token": "ya29.abunchofnonsense",
-//     "token_expiry": "2018-12-02T04:08:13Z"
-//   }
-// }
+//	{
+//	  "credential": {
+//	    "access_token": "supersecretaccesstoken",
+//	    "token_expiry": "2018-12-02T04:08:13Z"
+//	  }
+//	}
 type gcloudOutput struct {
 	Credential struct {
 		AccessToken string `json:"access_token"`
@@ -140,31 +143,33 @@ type gcloudOutput struct {
 }
 
 type gcloudSource struct {
+	ctx context.Context
+
 	// This is passed in so that we mock out gcloud and test Token.
-	cmd *exec.Cmd
+	exec func(ctx context.Context) *exec.Cmd
 }
 
 // Token implements oauath2.TokenSource.
 func (gs gcloudSource) Token() (*oauth2.Token, error) {
-	cmd := gs.cmd
+	cmd := gs.exec(gs.ctx)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 
 	// Don't attempt to interpret stderr, just pass it through.
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = logs.Warn.Writer()
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("error executing `gcloud config config-helper`: %v", err)
+		return nil, fmt.Errorf("error executing `gcloud config config-helper`: %w", err)
 	}
 
 	creds := gcloudOutput{}
 	if err := json.Unmarshal(out.Bytes(), &creds); err != nil {
-		return nil, fmt.Errorf("failed to parse `gcloud config config-helper` output: %v", err)
+		return nil, fmt.Errorf("failed to parse `gcloud config config-helper` output: %w", err)
 	}
 
 	expiry, err := time.Parse(time.RFC3339, creds.Credential.TokenExpiry)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse gcloud token expiry: %v", err)
+		return nil, fmt.Errorf("failed to parse gcloud token expiry: %w", err)
 	}
 
 	token := oauth2.Token{

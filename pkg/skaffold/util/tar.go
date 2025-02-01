@@ -19,6 +19,7 @@ package util
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -26,18 +27,34 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/sirupsen/logrus"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/constants"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	timeutil "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util/time"
 )
 
 type headerModifier func(*tar.Header)
 
-func CreateMappedTar(w io.Writer, root string, pathMap map[string][]string) error {
+type cancelableWriter struct {
+	w   io.Writer
+	ctx context.Context
+}
+
+func (cw *cancelableWriter) Write(p []byte) (n int, err error) {
+	select {
+	case <-cw.ctx.Done():
+		return 0, cw.ctx.Err()
+	default:
+		return cw.w.Write(p)
+	}
+}
+
+func CreateMappedTar(ctx context.Context, w io.Writer, root string, pathMap map[string][]string) error {
 	tw := tar.NewWriter(w)
 	defer tw.Close()
 
 	for src, dsts := range pathMap {
 		for _, dst := range dsts {
-			if err := addFileToTar(root, src, dst, tw, nil); err != nil {
+			if err := addFileToTar(ctx, root, src, dst, tw, nil); err != nil {
 				return err
 			}
 		}
@@ -46,20 +63,35 @@ func CreateMappedTar(w io.Writer, root string, pathMap map[string][]string) erro
 	return nil
 }
 
-func CreateTar(w io.Writer, root string, paths []string) error {
+func CreateTar(ctx context.Context, w io.Writer, root string, paths []string) error {
 	tw := tar.NewWriter(w)
 	defer tw.Close()
 
-	for _, path := range paths {
-		if err := addFileToTar(root, path, "", tw, nil); err != nil {
+	batchSize := len(paths) / 10
+	if batchSize < 10 {
+		batchSize = 5
+	}
+
+	log.Entry(ctx).Infof("Creating tar file from %d file(s)", len(paths))
+	start := time.Now()
+	defer func() {
+		log.Entry(ctx).Infof("Creating tar file completed in %s", timeutil.Humanize(time.Since(start)))
+	}()
+
+	for i, path := range paths {
+		if err := addFileToTar(ctx, root, path, "", tw, nil); err != nil {
 			return err
+		}
+
+		if (i+1)%batchSize == 0 {
+			log.Entry(ctx).Infof("Added %d/%d files to tar file", i+1, len(paths))
 		}
 	}
 
 	return nil
 }
 
-func CreateTarWithParents(w io.Writer, root string, paths []string, uid, gid int, modTime time.Time) error {
+func CreateTarWithParents(ctx context.Context, w io.Writer, root string, paths []string, uid, gid int, modTime time.Time) error {
 	headerModifier := func(header *tar.Header) {
 		header.ModTime = modTime
 		header.Uid = uid
@@ -84,7 +116,7 @@ func CreateTarWithParents(w io.Writer, root string, paths []string, uid, gid int
 		}
 
 		for i := len(parentsFirst) - 1; i >= 0; i-- {
-			if err := addFileToTar(root, parentsFirst[i], "", tw, headerModifier); err != nil {
+			if err := addFileToTar(ctx, root, parentsFirst[i], "", tw, headerModifier); err != nil {
 				return err
 			}
 		}
@@ -93,13 +125,13 @@ func CreateTarWithParents(w io.Writer, root string, paths []string, uid, gid int
 	return nil
 }
 
-func CreateTarGz(w io.Writer, root string, paths []string) error {
+func CreateTarGz(ctx context.Context, w io.Writer, root string, paths []string) error {
 	gw := gzip.NewWriter(w)
 	defer gw.Close()
-	return CreateTar(gw, root, paths)
+	return CreateTar(ctx, gw, root, paths)
 }
 
-func addFileToTar(root string, src string, dst string, tw *tar.Writer, hm headerModifier) error {
+func addFileToTar(ctx context.Context, root string, src string, dst string, tw *tar.Writer, hm headerModifier) error {
 	fi, err := os.Lstat(src)
 	if err != nil {
 		return err
@@ -118,7 +150,7 @@ func addFileToTar(root string, src string, dst string, tw *tar.Writer, hm header
 		}
 
 		if filepath.IsAbs(target) {
-			logrus.Warnf("Skipping %s. Only relative symlinks are supported.", src)
+			log.Entry(ctx).Warnf("Skipping %s. Only relative symlinks are supported.", src)
 			return nil
 		}
 
@@ -145,7 +177,7 @@ func addFileToTar(root string, src string, dst string, tw *tar.Writer, hm header
 	}
 
 	// Code copied from https://github.com/moby/moby/blob/master/pkg/archive/archive_windows.go
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == constants.Windows {
 		header.Mode = int64(chmodTarEntry(os.FileMode(header.Mode)))
 	}
 	if hm != nil {
@@ -154,7 +186,6 @@ func addFileToTar(root string, src string, dst string, tw *tar.Writer, hm header
 	if err := tw.WriteHeader(header); err != nil {
 		return err
 	}
-
 	if mode.IsRegular() {
 		f, err := os.Open(src)
 		if err != nil {
@@ -162,7 +193,15 @@ func addFileToTar(root string, src string, dst string, tw *tar.Writer, hm header
 		}
 		defer f.Close()
 
-		if _, err := io.Copy(tw, f); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Wrap the tar.Writer in a cancelableWriter that checks the context
+		cw := &cancelableWriter{w: tw, ctx: ctx}
+
+		// Proceed with copying the file content using the cancelable writer
+		if _, err := io.Copy(cw, f); err != nil {
 			return fmt.Errorf("writing real file %q: %w", src, err)
 		}
 	}
@@ -172,7 +211,7 @@ func addFileToTar(root string, src string, dst string, tw *tar.Writer, hm header
 
 // Code copied from https://github.com/moby/moby/blob/master/pkg/archive/archive_windows.go
 func chmodTarEntry(perm os.FileMode) os.FileMode {
-	//perm &= 0755 // this 0-ed out tar flags (like link, regular file, directory marker etc.)
+	// perm &= 0755 // this 0-ed out tar flags (like link, regular file, directory marker etc.)
 	permPart := perm & os.ModePerm
 	noPermPart := perm &^ os.ModePerm
 	// Add the x bit: make everything +x from windows

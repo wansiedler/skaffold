@@ -19,10 +19,10 @@ package flags
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
 )
 
 // BuildOutputFileFlag describes a flag which contains a BuildOutput.
@@ -33,7 +33,7 @@ type BuildOutputFileFlag struct {
 
 // BuildOutput is the output of `skaffold build`.
 type BuildOutput struct {
-	Builds []build.Artifact `json:"builds"`
+	Builds []graph.Artifact `json:"builds"`
 }
 
 func (t *BuildOutputFileFlag) String() string {
@@ -53,12 +53,12 @@ func (t *BuildOutputFileFlag) Set(value string) error {
 	)
 
 	if value == "-" {
-		buf, err = ioutil.ReadAll(os.Stdin)
+		buf, err = io.ReadAll(os.Stdin)
 	} else {
 		if _, err := os.Stat(value); os.IsNotExist(err) {
 			return err
 		}
-		buf, err = ioutil.ReadFile(value)
+		buf, err = os.ReadFile(value)
 	}
 	if err != nil {
 		return err
@@ -80,7 +80,7 @@ func (t *BuildOutputFileFlag) Type() string {
 }
 
 // BuildArtifacts returns the Build Artifacts in the BuildOutputFileFlag
-func (t *BuildOutputFileFlag) BuildArtifacts() []build.Artifact {
+func (t *BuildOutputFileFlag) BuildArtifacts() []graph.Artifact {
 	return t.buildOutput.Builds
 }
 

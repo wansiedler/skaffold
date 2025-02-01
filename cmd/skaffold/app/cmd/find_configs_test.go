@@ -17,12 +17,13 @@ limitations under the License.
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/v1beta7"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/v1beta7"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestFindConfigs(t *testing.T) {
@@ -55,7 +56,7 @@ func TestFindConfigs(t *testing.T) {
 		testutil.Run(t, "", func(t *testutil.T) {
 			tmpDir := t.NewTempDir().WriteFiles(test.files)
 
-			pathToVersion, err := findConfigs(tmpDir.Root())
+			pathToVersion, err := findConfigs(context.TODO(), tmpDir.Root())
 
 			t.CheckNoError(err)
 			t.CheckDeepEqual(len(test.expected), len(pathToVersion))

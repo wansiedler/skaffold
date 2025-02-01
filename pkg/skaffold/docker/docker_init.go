@@ -17,16 +17,17 @@ limitations under the License.
 package docker
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/moby/buildkit/frontend/dockerfile/command"
 	"github.com/moby/buildkit/frontend/dockerfile/parser"
-	"github.com/sirupsen/logrus"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
 )
 
 // For testing
@@ -53,15 +54,19 @@ func (c ArtifactConfig) Describe() string {
 }
 
 // ArtifactType returns the type of the artifact to be built.
-func (c ArtifactConfig) ArtifactType() latest.ArtifactType {
+func (c ArtifactConfig) ArtifactType(workspace string) latest.ArtifactType {
 	dockerfile := filepath.Base(c.File)
-	if dockerfile == constants.DefaultDockerfilePath {
-		return latest.ArtifactType{}
+	if workspace != "" {
+		// attempt to relativize the path
+		if rel, err := filepath.Rel(workspace, c.File); err == nil {
+			dockerfile = rel
+		}
 	}
 
 	return latest.ArtifactType{
 		DockerArtifact: &latest.DockerArtifact{
-			DockerfilePath: dockerfile,
+			// to make skaffold.yaml more portable across OS-es we should always generate /-delimited filePaths
+			DockerfilePath: filepath.ToSlash(dockerfile),
 		},
 	}
 }
@@ -81,7 +86,7 @@ func (c ArtifactConfig) Path() string {
 func validate(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
-		logrus.Warnf("opening file %s: %s", path, err.Error())
+		log.Entry(context.TODO()).Warnf("opening file %s: %s", path, err.Error())
 		return false
 	}
 	defer f.Close()
@@ -93,7 +98,7 @@ func validate(path string) bool {
 
 	// validate each node contains valid dockerfile directive
 	for _, child := range res.AST.Children {
-		_, ok := command.Commands[child.Value]
+		_, ok := command.Commands[strings.ToLower(child.Value)]
 		if !ok {
 			return false
 		}

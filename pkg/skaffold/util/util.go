@@ -19,20 +19,22 @@ package util
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
-	"net/http"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
-	"github.com/sirupsen/logrus"
+	"github.com/joho/godotenv"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/walk"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/yaml"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/walk"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/yaml"
 )
 
 const (
@@ -46,27 +48,6 @@ func RandomID() string {
 		panic(err)
 	}
 	return fmt.Sprintf("%x", b)
-}
-
-func StrSliceContains(sl []string, s string) bool {
-	return StrSliceIndex(sl, s) >= 0
-}
-
-func StrSliceIndex(sl []string, s string) int {
-	for i, a := range sl {
-		if a == s {
-			return i
-		}
-	}
-	return -1
-}
-
-func StrSliceInsert(sl []string, index int, insert []string) []string {
-	newSlice := make([]string, len(sl)+len(insert))
-	copy(newSlice[0:index], sl[0:index])
-	copy(newSlice[index:index+len(insert)], insert)
-	copy(newSlice[index+len(insert):], sl[index:])
-	return newSlice
 }
 
 // orderedFileSet holds an ordered set of file paths.
@@ -98,13 +79,11 @@ func ExpandPathsGlob(workingDir string, paths []string) ([]string, error) {
 	var set orderedFileSet
 
 	for _, p := range paths {
-		if filepath.IsAbs(p) {
-			// This is a absolute file reference
-			set.Add(p)
-			continue
+		path := p
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(workingDir, path)
 		}
 
-		path := filepath.Join(workingDir, p)
 		if _, err := os.Stat(path); err == nil {
 			// This is a file reference, so just add it
 			set.Add(path)
@@ -116,7 +95,7 @@ func ExpandPathsGlob(workingDir string, paths []string) ([]string, error) {
 			return nil, fmt.Errorf("glob: %w", err)
 		}
 		if len(files) == 0 {
-			logrus.Warnf("%s did not match any file", p)
+			log.Entry(context.TODO()).Warnf("%s did not match any file", p)
 		}
 
 		for _, f := range files {
@@ -132,30 +111,13 @@ func ExpandPathsGlob(workingDir string, paths []string) ([]string, error) {
 	return set.Files(), nil
 }
 
-// BoolPtr returns a pointer to a bool
-func BoolPtr(b bool) *bool {
-	o := b
-	return &o
-}
-
-// StringPtr returns a pointer to a string
-func StringPtr(s string) *string {
-	o := s
+func Ptr[T any](t T) *T {
+	o := t
 	return &o
 }
 
 func IsURL(s string) bool {
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
-}
-
-func Download(url string) ([]byte, error) {
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	return ioutil.ReadAll(resp.Body)
 }
 
 // VerifyOrCreateFile checks if a file exists at the given path,
@@ -175,20 +137,10 @@ func VerifyOrCreateFile(path string) error {
 	return err
 }
 
-// RemoveFromSlice removes a string from a slice of strings
-func RemoveFromSlice(s []string, target string) []string {
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] == target {
-			s = append(s[:i], s[i+1:]...)
-		}
-	}
-	return s
-}
-
 // Expand replaces placeholders for a given key with a given value.
 // It supports the ${key} and the $key syntax.
 func Expand(text, key, value string) string {
-	text = strings.Replace(text, "${"+key+"}", value, -1)
+	text = strings.ReplaceAll(text, "${"+key+"}", value)
 
 	indices := regexp.MustCompile(`\$`+key).FindAllStringIndex(text, -1)
 
@@ -202,6 +154,42 @@ func Expand(text, key, value string) string {
 	}
 
 	return text
+}
+
+// EnvMapToSlice converts map of (string,string) to string slice
+func EnvMapToSlice(m map[string]string, separator string) []string {
+	var sl []string
+	for k, v := range m {
+		sl = append(sl, fmt.Sprintf("%s%s%s", k, separator, v))
+	}
+	sort.Strings(sl)
+	return sl
+}
+
+// EnvPtrMapToSlice converts map of (string,*string) to string slice
+func EnvPtrMapToSlice(m map[string]*string, separator string) []string {
+	var sl []string
+	for k, v := range m {
+		if v == nil {
+			sl = append(sl, k)
+			continue
+		}
+		sl = append(sl, fmt.Sprintf("%s%s%s", k, separator, *v))
+	}
+	sort.Strings(sl)
+	return sl
+}
+
+// EnvSliceToMap converts a string slice into a map of (string,string) using the given separator
+func EnvSliceToMap(slice []string, separator string) map[string]string {
+	m := make(map[string]string, len(slice))
+	for _, e := range slice {
+		// Toss any keys without a value
+		if v := strings.SplitN(e, separator, 2); len(v) == 2 {
+			m[v[0]] = v[1]
+		}
+	}
+	return m
 }
 
 func isAlphaNum(c uint8) bool {
@@ -289,6 +277,19 @@ func IsDir(path string) bool {
 	return (err == nil || !os.IsNotExist(err)) && info.IsDir()
 }
 
+// IsEmptyDir returns true for empty directories otherwise false
+func IsEmptyDir(path string) bool {
+	d, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer d.Close()
+	if _, err := d.Readdirnames(1); err == io.EOF {
+		return true
+	}
+	return false
+}
+
 // IsHiddenDir returns if a directory is hidden.
 func IsHiddenDir(filename string) bool {
 	// Return false for current dir
@@ -304,6 +305,60 @@ func IsHiddenFile(filename string) bool {
 	return hasHiddenPrefix(filename)
 }
 
+// IsSubPath return true if targetpath is sub-path of basepath; doesn't check for symlinks
+func IsSubPath(basepath string, targetpath string) bool {
+	rel, err := filepath.Rel(basepath, targetpath)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
 func hasHiddenPrefix(s string) bool {
 	return strings.HasPrefix(s, hiddenPrefix)
+}
+
+func SanitizeHelmTemplateValue(s string) string {
+	// replaces commonly used image name chars that are illegal go template chars
+	// replaces "/", "-", "." and ":" with "_"
+	r := strings.NewReplacer(".", "_", "-", "_", "/", "_", ":", "_")
+	return r.Replace(s)
+}
+
+func ParseNamespaceFromFlags(flgs []string) string {
+	for i, s := range flgs {
+		if s == "-n" && i < len(flgs)-1 {
+			return flgs[i+1]
+		}
+		if strings.HasPrefix(s, "-n=") && len(strings.Split(s, "=")) == 2 {
+			return strings.Split(s, "=")[1]
+		}
+		if s == "--namespace" && i < len(flgs)-1 {
+			return flgs[i+1]
+		}
+		if strings.HasPrefix(s, "--namespace=") && len(strings.Split(s, "=")) == 2 {
+			return strings.Split(s, "=")[1]
+		}
+	}
+	return ""
+}
+
+func ExpandHomePath(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		dirname, _ := os.UserHomeDir()
+		path = filepath.Join(dirname, path[2:])
+	}
+	return path
+}
+
+func ParseEnvVariablesFromFile(fp string) (map[string]string, error) {
+	f, err := os.Open(fp)
+	if err != nil {
+		return nil, err
+	}
+	envMap, err := godotenv.Parse(f)
+	if err != nil {
+		return nil, err
+	}
+	return envMap, nil
 }

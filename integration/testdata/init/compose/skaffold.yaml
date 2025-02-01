@@ -1,12 +1,13 @@
-apiVersion: skaffold/v2beta6
+apiVersion: skaffold/v4beta12
 kind: Config
 metadata:
   name: compose
 build:
   artifacts:
-  - image: gcr.io/k8s-skaffold/compose
-deploy:
-  kubectl:
-    manifests:
-    - compose-deployment.yaml
-    - compose-service.yaml
+  - image: us-central1-docker.pkg.dev/k8s-skaffold/testing/compose
+    docker:
+      dockerfile: Dockerfile
+manifests:
+  rawYaml:
+  - compose-deployment.yaml
+  - compose-service.yaml

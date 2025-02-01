@@ -23,9 +23,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/initializer/errors"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/initializer/prompt"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/initializer/errors"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/initializer/prompt"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util/stringslice"
 )
 
 // For each image parsed from all k8s manifests, prompt the user for the builder that builds the referenced image
@@ -39,12 +39,12 @@ func (d *defaultBuildInitializer) resolveBuilderImages() error {
 	if len(d.builders) == 1 {
 		if len(d.unresolvedImages) == 0 {
 			// no image was parsed from k8s manifests, so we create an image name
-			d.generatedBuilderImagePairs = append(d.generatedBuilderImagePairs, getGeneratedBuilderPair(d.builders[0]))
+			d.generatedArtifactInfos = append(d.generatedArtifactInfos, getGeneratedArtifactInfo(d.builders[0]))
 			return nil
 		}
 		// we already have the image, just use it and return
 		if len(d.unresolvedImages) == 1 {
-			d.builderImagePairs = append(d.builderImagePairs, BuilderImagePair{
+			d.artifactInfos = append(d.artifactInfos, ArtifactInfo{
 				Builder:   d.builders[0],
 				ImageName: d.unresolvedImages[0],
 			})
@@ -53,10 +53,47 @@ func (d *defaultBuildInitializer) resolveBuilderImages() error {
 	}
 
 	if d.force {
-		return errors.BuilderImageAmbiguitiesErr{}
+		return d.resolveBuilderImagesForcefully()
 	}
 
 	return d.resolveBuilderImagesInteractively()
+}
+
+func (d *defaultBuildInitializer) resolveBuilderImagesForcefully() error {
+	// In the case of 1 image and multiple builders, respects the ordering Docker > Jib > Bazel > Buildpacks
+	if len(d.unresolvedImages) == 1 {
+		image := d.unresolvedImages[0]
+		choice := d.builders[0]
+		for _, builder := range d.builders {
+			if builderRank(builder) < builderRank(choice) {
+				choice = builder
+			}
+		}
+
+		d.artifactInfos = append(d.artifactInfos, ArtifactInfo{Builder: choice, ImageName: image})
+		d.unresolvedImages = []string{}
+		return nil
+	}
+
+	return errors.BuilderImageAmbiguitiesErr{}
+}
+
+func builderRank(builder InitBuilder) int {
+	a := builder.ArtifactType("")
+	switch {
+	case a.DockerArtifact != nil:
+		return 1
+	case a.JibArtifact != nil:
+		return 2
+	case a.KoArtifact != nil:
+		return 3
+	case a.BazelArtifact != nil:
+		return 4
+	case a.BuildpackArtifact != nil:
+		return 5
+	}
+
+	return 6
 }
 
 func (d *defaultBuildInitializer) resolveBuilderImagesInteractively() error {
@@ -83,21 +120,25 @@ func (d *defaultBuildInitializer) resolveBuilderImagesInteractively() error {
 		}
 
 		if choice != NoBuilder {
-			d.builderImagePairs = append(d.builderImagePairs, BuilderImagePair{Builder: choiceMap[choice], ImageName: image})
-			choices = util.RemoveFromSlice(choices, choice)
+			d.artifactInfos = append(d.artifactInfos, ArtifactInfo{Builder: choiceMap[choice], ImageName: image})
+			choices = stringslice.Remove(choices, choice)
 		}
-		d.unresolvedImages = util.RemoveFromSlice(d.unresolvedImages, image)
+		d.unresolvedImages = stringslice.Remove(d.unresolvedImages, image)
 	}
 	if len(choices) > 0 {
-		// TODO(nkubala): should we ask user if they want to generate here?
-		for _, choice := range choices {
-			d.generatedBuilderImagePairs = append(d.generatedBuilderImagePairs, getGeneratedBuilderPair(choiceMap[choice]))
+		chosen, err := prompt.ChooseBuildersFunc(choices)
+		if err != nil {
+			return err
+		}
+
+		for _, choice := range chosen {
+			d.generatedArtifactInfos = append(d.generatedArtifactInfos, getGeneratedArtifactInfo(choiceMap[choice]))
 		}
 	}
 	return nil
 }
 
-func getGeneratedBuilderPair(b InitBuilder) GeneratedBuilderImagePair {
+func getGeneratedArtifactInfo(b InitBuilder) GeneratedArtifactInfo {
 	path := b.Path()
 	var imageName string
 	// if the builder is in a nested directory, use that as the image name AND the path to write the manifest
@@ -109,8 +150,8 @@ func getGeneratedBuilderPair(b InitBuilder) GeneratedBuilderImagePair {
 		imageName = fmt.Sprintf("%s-image", strings.ToLower(path))
 		path = "."
 	}
-	return GeneratedBuilderImagePair{
-		BuilderImagePair: BuilderImagePair{
+	return GeneratedArtifactInfo{
+		ArtifactInfo: ArtifactInfo{
 			Builder:   b,
 			ImageName: sanitizeImageName(imageName),
 		},
@@ -120,7 +161,7 @@ func getGeneratedBuilderPair(b InitBuilder) GeneratedBuilderImagePair {
 
 func sanitizeImageName(imageName string) string {
 	// Replace unsupported characters with `_`
-	sanitized := regexp.MustCompile(`[^a-zA-Z0-9-._]`).ReplaceAllString(imageName, `-`)
+	sanitized := regexp.MustCompile(`[^a-zA-Z0-9-_]`).ReplaceAllString(imageName, `-`)
 
 	// Truncate to 128 characters
 	if len(sanitized) > 128 {

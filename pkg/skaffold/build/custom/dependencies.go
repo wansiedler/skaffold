@@ -23,23 +23,23 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/list"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/list"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 // GetDependencies returns dependencies listed for a custom artifact
-func GetDependencies(ctx context.Context, workspace string, a *latest.CustomArtifact, insecureRegistries map[string]bool) ([]string, error) {
+func GetDependencies(ctx context.Context, workspace string, artifactName string, a *latest.CustomArtifact, cfg docker.Config) ([]string, error) {
 	switch {
 	case a.Dependencies.Dockerfile != nil:
-		dockerfile := a.Dependencies.Dockerfile
-		return docker.GetDependencies(ctx, workspace, dockerfile.Path, dockerfile.BuildArgs, insecureRegistries)
+		return docker.GetDependencies(ctx, getDockerBuildConfig(workspace, artifactName, a), cfg)
 
 	case a.Dependencies.Command != "":
 		split := strings.Split(a.Dependencies.Command, " ")
 		cmd := exec.CommandContext(ctx, split[0], split[1:]...)
-		output, err := util.RunCmdOut(cmd)
+		cmd.Dir = workspace
+		output, err := util.RunCmdOut(ctx, cmd)
 		if err != nil {
 			return nil, fmt.Errorf("getting dependencies from command: %q: %w", a.Dependencies.Command, err)
 		}
@@ -52,4 +52,9 @@ func GetDependencies(ctx context.Context, workspace string, a *latest.CustomArti
 	default:
 		return list.Files(workspace, a.Dependencies.Paths, a.Dependencies.Ignore)
 	}
+}
+
+func getDockerBuildConfig(ws string, artifact string, a *latest.CustomArtifact) docker.BuildConfig {
+	dockerfile := a.Dependencies.Dockerfile
+	return docker.NewBuildConfig(ws, artifact, dockerfile.Path, dockerfile.BuildArgs)
 }

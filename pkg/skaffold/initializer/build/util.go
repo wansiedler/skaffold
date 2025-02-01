@@ -17,18 +17,16 @@ limitations under the License.
 package build
 
 import (
-	"fmt"
-	"os"
 	"path/filepath"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/tag"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	tag "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/tag/util"
 )
 
-func matchBuildersToImages(builders []InitBuilder, images []string) ([]BuilderImagePair, []InitBuilder, []string) {
-	images = tag.StripTags(images)
+func matchBuildersToImages(builders []InitBuilder, images []string) ([]ArtifactInfo, []InitBuilder, []string) {
+	images = tag.StripTags(images, true)
 
-	var pairs []BuilderImagePair
+	var artifactInfos []ArtifactInfo
 	var unresolvedImages = make(sortedSet)
 	for _, image := range images {
 		builderIdx := findExactlyOneMatchingBuilder(builders, image)
@@ -36,7 +34,7 @@ func matchBuildersToImages(builders []InitBuilder, images []string) ([]BuilderIm
 		// exactly one builder found for the image
 		if builderIdx != -1 {
 			// save the pair
-			pairs = append(pairs, BuilderImagePair{ImageName: image, Builder: builders[builderIdx]})
+			artifactInfos = append(artifactInfos, ArtifactInfo{ImageName: image, Builder: builders[builderIdx]})
 			// remove matched builder from builderConfigs
 			builders = append(builders[:builderIdx], builders[builderIdx+1:]...)
 		} else {
@@ -44,7 +42,7 @@ func matchBuildersToImages(builders []InitBuilder, images []string) ([]BuilderIm
 			unresolvedImages.add(image)
 		}
 	}
-	return pairs, builders, unresolvedImages.values()
+	return artifactInfos, builders, unresolvedImages.values()
 }
 
 func findExactlyOneMatchingBuilder(builderConfigs []InitBuilder, image string) int {
@@ -62,19 +60,27 @@ func findExactlyOneMatchingBuilder(builderConfigs []InitBuilder, image string) i
 	return matchingConfigIndex
 }
 
-func Artifacts(pairs []BuilderImagePair) []*latest.Artifact {
+// Artifacts takes builder image pairs and workspaces and creates a list of latest.Artifacts from the data.
+func Artifacts(artifactInfos []ArtifactInfo) []*latest.Artifact {
 	var artifacts []*latest.Artifact
 
-	for _, pair := range pairs {
+	for _, info := range artifactInfos {
+		// Don't create artifact build config for "None" builder
+		if info.Builder.Name() == NoneBuilderName {
+			continue
+		}
+		workspace := info.Workspace
+		if workspace == "" {
+			workspace = filepath.Dir(info.Builder.Path())
+		}
 		artifact := &latest.Artifact{
-			ImageName:    pair.ImageName,
-			ArtifactType: pair.Builder.ArtifactType(),
+			ImageName:    info.ImageName,
+			ArtifactType: info.Builder.ArtifactType(workspace),
 		}
 
-		workspace := filepath.Dir(pair.Builder.Path())
 		if workspace != "." {
-			fmt.Fprintf(os.Stdout, "using non standard workspace: %s\n", workspace)
-			artifact.Workspace = workspace
+			// to make skaffold.yaml more portable across OS-es we should always generate /-delimited filepaths
+			artifact.Workspace = filepath.ToSlash(workspace)
 		}
 
 		artifacts = append(artifacts, artifact)

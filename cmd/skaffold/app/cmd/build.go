@@ -21,21 +21,22 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
-	"github.com/GoogleContainerTools/skaffold/cmd/skaffold/app/flags"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/cmd/skaffold/app/flags"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
 )
 
 var (
-	quietFlag       bool
-	buildFormatFlag = flags.NewTemplateFlag("{{json .}}", flags.BuildOutput{})
-	buildOutputFlag string
+	quietFlag                  bool
+	defaultBuildFormatTemplate = "{{json .}}"
+	buildFormatFlag            = flags.NewTemplateFlag(defaultBuildFormatTemplate, flags.BuildOutput{})
+	buildOutputFlag            string
 )
 
 // NewCmdBuild describes the CLI command to build artifacts.
@@ -50,24 +51,25 @@ func NewCmdBuild() *cobra.Command {
 		WithExample("Build the artifacts and then deploy them", "build -q | skaffold deploy --build-artifacts -").
 		WithExample("Print the final image names", "build -q --dry-run").
 		WithCommonFlags().
-		WithFlags(func(f *pflag.FlagSet) {
-			f.StringSliceVarP(&opts.TargetImages, "build-image", "b", nil, "Choose which artifacts to build. Artifacts with image names that contain the expression will be built only. Default is to build sources for all artifacts")
-			f.BoolVarP(&quietFlag, "quiet", "q", false, "Suppress the build output and print image built on success. See --output to format output.")
-			f.VarP(buildFormatFlag, "output", "o", "Used in conjunction with --quiet flag. "+buildFormatFlag.Usage())
-			f.StringVar(&buildOutputFlag, "file-output", "", "Filename to write build images to")
-			f.BoolVar(&opts.DryRun, "dry-run", false, "Don't build images, just compute the tag for each artifact.")
+		WithFlags([]*Flag{
+			{Value: &quietFlag, Name: "quiet", Shorthand: "q", DefValue: false, Usage: "Suppress the build output and print image built on success. See --output to format output.", IsEnum: true},
+			{Value: buildFormatFlag, Name: "output", Shorthand: "o", DefValue: defaultBuildFormatTemplate, Usage: "Used in conjunction with --quiet flag. " + buildFormatFlag.Usage()},
+			{Value: &buildOutputFlag, Name: "file-output", DefValue: "", Usage: "Filename to write build images to"},
+			{Value: &opts.DryRun, Name: "dry-run", DefValue: false, Usage: "Don't build images, just compute the tag for each artifact.", IsEnum: true},
+			{Value: &opts.PushImages, Name: "push", DefValue: nil, Usage: "Push the built images to the specified image repository.", IsEnum: true, NoOptDefVal: "true"},
 		}).
+		WithHouseKeepingMessages().
 		NoArgs(doBuild)
 }
 
 func doBuild(ctx context.Context, out io.Writer) error {
 	buildOut := out
 	if quietFlag {
-		buildOut = ioutil.Discard
+		buildOut = io.Discard
 	}
 
-	return withRunner(ctx, func(r runner.Runner, config *latest.SkaffoldConfig) error {
-		bRes, err := r.BuildAndTest(ctx, buildOut, targetArtifacts(opts, config))
+	return withRunner(ctx, out, func(r runner.Runner, configs []util.VersionedConfig) error {
+		bRes, err := r.Build(ctx, buildOut, targetArtifacts(opts, configs))
 
 		if quietFlag || buildOutputFlag != "" {
 			cmdOut := flags.BuildOutput{Builds: bRes}
@@ -83,7 +85,7 @@ func doBuild(ctx context.Context, out io.Writer) error {
 			}
 
 			if buildOutputFlag != "" {
-				if err := ioutil.WriteFile(buildOutputFlag, buildOutput.Bytes(), 0644); err != nil {
+				if err := os.WriteFile(buildOutputFlag, buildOutput.Bytes(), 0644); err != nil {
 					return fmt.Errorf("writing build output to file: %w", err)
 				}
 			}
@@ -93,14 +95,14 @@ func doBuild(ctx context.Context, out io.Writer) error {
 	})
 }
 
-func targetArtifacts(opts config.SkaffoldOptions, cfg *latest.SkaffoldConfig) []*latest.Artifact {
+func targetArtifacts(opts config.SkaffoldOptions, configs []util.VersionedConfig) []*latest.Artifact {
 	var targetArtifacts []*latest.Artifact
-
-	for _, artifact := range cfg.Build.Artifacts {
-		if opts.IsTargetImage(artifact) {
-			targetArtifacts = append(targetArtifacts, artifact)
+	for _, cfg := range configs {
+		for _, artifact := range cfg.(*latest.SkaffoldConfig).Build.Artifacts {
+			if opts.IsTargetImage(artifact) {
+				targetArtifacts = append(targetArtifacts, artifact)
+			}
 		}
 	}
-
 	return targetArtifacts
 }

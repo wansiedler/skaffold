@@ -19,23 +19,36 @@ package cache
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/tag"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	specs "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/instrumentation"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/tag"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
-func (c *cache) lookupArtifacts(ctx context.Context, tags tag.ImageTags, artifacts []*latest.Artifact) []cacheDetails {
+func (c *cache) lookupArtifacts(ctx context.Context, out io.Writer, tags tag.ImageTags, platforms platform.Resolver, artifacts []*latest.Artifact) []cacheDetails {
 	details := make([]cacheDetails, len(artifacts))
+	// Create a new `artifactHasher` on every new dev loop.
+	// This way every artifact hash is calculated at most once in a single dev loop, and recalculated on every dev loop.
 
+	ctx, endTrace := instrumentation.StartTrace(ctx, "lookupArtifacts_CacheLookupArtifacts")
+	defer endTrace()
+	h := newArtifactHasherFunc(c.artifactGraph, c.lister, c.cfg.Mode())
 	var wg sync.WaitGroup
 	for i := range artifacts {
 		wg.Add(1)
 
 		i := i
 		go func() {
-			details[i] = c.lookup(ctx, artifacts[i], tags[artifacts[i].ImageName])
+			details[i] = c.lookup(ctx, out, artifacts[i], tags, platforms, h)
 			wg.Done()
 		}()
 	}
@@ -44,21 +57,42 @@ func (c *cache) lookupArtifacts(ctx context.Context, tags tag.ImageTags, artifac
 	return details
 }
 
-func (c *cache) lookup(ctx context.Context, a *latest.Artifact, tag string) cacheDetails {
-	hash, err := c.hashForArtifact(ctx, a)
+func (c *cache) lookup(ctx context.Context, out io.Writer, a *latest.Artifact, tags map[string]string, platforms platform.Resolver, h artifactHasher) cacheDetails {
+	tag := tags[a.ImageName]
+	ctx, endTrace := instrumentation.StartTrace(ctx, "lookup_CacheLookupOneArtifact", map[string]string{
+		"ImageName": instrumentation.PII(a.ImageName),
+	})
+	defer endTrace()
+
+	hash, err := h.hash(ctx, out, a, platforms, tag)
 	if err != nil {
 		return failed{err: fmt.Errorf("getting hash for artifact %q: %s", a.ImageName, err)}
 	}
 
+	c.cacheMutex.RLock()
 	entry, cacheHit := c.artifactCache[hash]
-	if !cacheHit {
-		return needsBuilding{hash: hash}
+	c.cacheMutex.RUnlock()
+
+	pls := platforms.GetPlatforms(a.ImageName)
+	// TODO (gaghosh): allow `tryImport` when the Docker daemon starts supporting multiarch images
+	// See https://github.com/docker/buildx/issues/1220#issuecomment-1189996403
+	if !cacheHit && !pls.IsMultiPlatform() {
+		var pl v1.Platform
+		if len(pls.Platforms) == 1 {
+			pl = util.ConvertToV1Platform(pls.Platforms[0])
+		}
+		if entry, err = c.tryImport(ctx, a, tag, hash, pl); err != nil {
+			log.Entry(ctx).Debugf("Could not import artifact from Docker, building instead (%s)", err)
+			return needsBuilding{hash: hash}
+		}
 	}
 
-	if c.imagesAreLocal {
+	if isLocal, err := c.isLocalImage(a.ImageName); err != nil {
+		return failed{err}
+	} else if isLocal {
 		return c.lookupLocal(ctx, hash, tag, entry)
 	}
-	return c.lookupRemote(ctx, hash, tag, entry)
+	return c.lookupRemote(ctx, hash, tag, pls.Platforms, entry)
 }
 
 func (c *cache) lookupLocal(ctx context.Context, hash, tag string, entry ImageDetails) cacheDetails {
@@ -69,7 +103,8 @@ func (c *cache) lookupLocal(ctx context.Context, hash, tag string, entry ImageDe
 	// Check the imageID for the tag
 	idForTag, err := c.client.ImageID(ctx, tag)
 	if err != nil {
-		return failed{err: fmt.Errorf("getting imageID for %s: %v", tag, err)}
+		// Rely on actionable errors thrown from pkg/skaffold/docker.LocalDaemon api.
+		return failed{err: err}
 	}
 
 	// Image exists locally with the same tag
@@ -85,8 +120,8 @@ func (c *cache) lookupLocal(ctx context.Context, hash, tag string, entry ImageDe
 	return needsBuilding{hash: hash}
 }
 
-func (c *cache) lookupRemote(ctx context.Context, hash, tag string, entry ImageDetails) cacheDetails {
-	if remoteDigest, err := docker.RemoteDigest(tag, c.insecureRegistries); err == nil {
+func (c *cache) lookupRemote(ctx context.Context, hash, tag string, platforms []specs.Platform, entry ImageDetails) cacheDetails {
+	if remoteDigest, err := docker.RemoteDigest(tag, c.cfg, nil); err == nil {
 		// Image exists remotely with the same tag and digest
 		if remoteDigest == entry.Digest {
 			return found{hash: hash}
@@ -95,9 +130,9 @@ func (c *cache) lookupRemote(ctx context.Context, hash, tag string, entry ImageD
 
 	// Image exists remotely with a different tag
 	fqn := tag + "@" + entry.Digest // Actual tag will be ignored but we need the registry and the digest part of it.
-	if remoteDigest, err := docker.RemoteDigest(fqn, c.insecureRegistries); err == nil {
+	if remoteDigest, err := docker.RemoteDigest(fqn, c.cfg, nil); err == nil {
 		if remoteDigest == entry.Digest {
-			return needsRemoteTagging{hash: hash, tag: tag, digest: entry.Digest}
+			return needsRemoteTagging{hash: hash, tag: tag, digest: entry.Digest, platforms: platforms}
 		}
 	}
 
@@ -107,4 +142,43 @@ func (c *cache) lookupRemote(ctx context.Context, hash, tag string, entry ImageD
 	}
 
 	return needsBuilding{hash: hash}
+}
+
+func (c *cache) tryImport(ctx context.Context, a *latest.Artifact, tag string, hash string, pl v1.Platform) (ImageDetails, error) {
+	entry := ImageDetails{}
+
+	if importMissing, err := c.importMissingImage(a.ImageName); err != nil {
+		return entry, err
+	} else if !importMissing {
+		return ImageDetails{}, fmt.Errorf("import of missing images disabled")
+	}
+
+	if !c.client.ImageExists(ctx, tag) {
+		log.Entry(ctx).Debugf("Importing artifact %s from docker registry", tag)
+		err := c.client.Pull(ctx, io.Discard, tag, pl)
+		if err != nil {
+			return entry, err
+		}
+	} else {
+		log.Entry(ctx).Debugf("Importing artifact %s from local docker", tag)
+	}
+
+	imageID, err := c.client.ImageID(ctx, tag)
+	if err != nil {
+		return entry, err
+	}
+
+	if imageID != "" {
+		entry.ID = imageID
+	}
+
+	if digest, err := docker.RemoteDigest(tag, c.cfg, nil); err == nil {
+		log.Entry(ctx).Debugf("Added digest for %s to cache entry", tag)
+		entry.Digest = digest
+	}
+
+	c.cacheMutex.Lock()
+	c.artifactCache[hash] = entry
+	c.cacheMutex.Unlock()
+	return entry, nil
 }

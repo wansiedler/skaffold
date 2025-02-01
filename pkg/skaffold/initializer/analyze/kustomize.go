@@ -17,9 +17,10 @@ limitations under the License.
 package analyze
 
 import (
+	"context"
 	"path/filepath"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/constants"
 )
 
 // kustomizeAnalyzer is a Visitor during the directory analysis that finds kustomize files
@@ -30,12 +31,26 @@ type kustomizeAnalyzer struct {
 	kustomizePaths []string
 }
 
-func (k *kustomizeAnalyzer) analyzeFile(path string) error {
+func (k *kustomizeAnalyzer) analyzeFile(ctx context.Context, filePath string) error {
 	switch {
-	case deploy.IsKustomizationBase(path):
-		k.bases = append(k.bases, filepath.Dir(path))
-	case deploy.IsKustomizationPath(path):
-		k.kustomizePaths = append(k.kustomizePaths, filepath.Dir(path))
+	case isKustomizationBase(filePath):
+		k.bases = append(k.bases, filepath.Dir(filePath))
+	case isKustomizationPath(filePath):
+		k.kustomizePaths = append(k.kustomizePaths, filepath.Dir(filePath))
 	}
 	return nil
+}
+
+func isKustomizationBase(path string) bool {
+	return filepath.Dir(path) == "base"
+}
+
+func isKustomizationPath(path string) bool {
+	filename := filepath.Base(path)
+	for _, candidate := range constants.KustomizeFilePaths {
+		if filename == candidate {
+			return true
+		}
+	}
+	return false
 }

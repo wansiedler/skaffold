@@ -20,8 +20,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
 )
 
 // For testing
@@ -49,7 +50,7 @@ func (c ArtifactConfig) Describe() string {
 }
 
 // ArtifactType returns the type of the artifact to be built.
-func (c ArtifactConfig) ArtifactType() latest.ArtifactType {
+func (c ArtifactConfig) ArtifactType(_ string) latest.ArtifactType {
 	return latest.ArtifactType{
 		BuildpackArtifact: &latest.BuildpackArtifact{
 			Builder: c.Builder,
@@ -96,5 +97,6 @@ func validate(path string) bool {
 		}
 	}
 
-	return false
+	// .NET project
+	return strings.HasSuffix(filepath.Base(path), ".csproj")
 }

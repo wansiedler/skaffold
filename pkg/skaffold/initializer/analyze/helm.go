@@ -17,18 +17,56 @@ limitations under the License.
 package analyze
 
 import (
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy"
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+)
+
+const (
+	ChartYaml = "Chart.yaml"
 )
 
 // helmAnalyzer is a Visitor during the directory analysis that finds helm charts
 type helmAnalyzer struct {
 	directoryAnalyzer
-	chartPaths []string
+	chartDirs map[string][]string
 }
 
-func (h *helmAnalyzer) analyzeFile(filePath string) error {
-	if deploy.IsHelmChart(filePath) {
-		h.chartPaths = append(h.chartPaths, filePath)
+func (h *helmAnalyzer) analyzeFile(ctx context.Context, fp string) error {
+	if isHelmChart(fp) {
+		chDir, _ := filepath.Split(fp)
+		h.chartDirs[filepath.Clean(chDir)] = []string{}
+		return nil
+	}
+	if isValueFile(fp) {
+		dir, _ := filepath.Split(fp)
+		dir = filepath.Clean(dir)
+		if s, ok := h.chartDirs[dir]; ok {
+			h.chartDirs[dir] = append(s, fp)
+		} else {
+			if hasChart(dir) {
+				h.chartDirs[dir] = []string{fp}
+			}
+			log.Entry(context.TODO()).Debugf("not detecting a yaml file %s as value file. Not part of any chart", fp)
+		}
 	}
 	return nil
+}
+
+func isValueFile(fp string) bool {
+	return strings.HasSuffix(fp, "yaml") || strings.HasSuffix(fp, "yml")
+}
+
+func isHelmChart(path string) bool {
+	return filepath.Base(path) == ChartYaml
+}
+
+func hasChart(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, ChartYaml)); os.IsNotExist(err) {
+		return false
+	}
+	return true
 }

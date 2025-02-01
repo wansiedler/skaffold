@@ -23,9 +23,12 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
 )
 
 const (
@@ -78,26 +81,47 @@ func NewStatusBackoff() *wait.Backoff {
 // Builder builds artifacts with Google Cloud Build.
 type Builder struct {
 	*latest.GoogleCloudBuild
+
+	cfg                Config
 	skipTests          bool
-	insecureRegistries map[string]bool
+	muted              build.Muted
+	artifactStore      build.ArtifactStore
+	sourceDependencies graph.SourceDependenciesCache
+}
+
+type Config interface {
+	docker.Config
+
+	SkipTests() bool
+	Muted() config.Muted
+}
+
+type BuilderContext interface {
+	Config
+	ArtifactStore() build.ArtifactStore
+	SourceDependenciesResolver() graph.SourceDependenciesCache
 }
 
 // NewBuilder creates a new Builder that builds artifacts with Google Cloud Build.
-func NewBuilder(runCtx *runcontext.RunContext) *Builder {
+func NewBuilder(bCtx BuilderContext, buildCfg *latest.GoogleCloudBuild) *Builder {
 	return &Builder{
-		GoogleCloudBuild:   runCtx.Cfg.Build.GoogleCloudBuild,
-		skipTests:          runCtx.Opts.SkipTests,
-		insecureRegistries: runCtx.InsecureRegistries,
-	}
-}
-
-// Labels are labels specific to Google Cloud Build.
-func (b *Builder) Labels() map[string]string {
-	return map[string]string{
-		constants.Labels.Builder: "google-cloud-build",
+		GoogleCloudBuild:   buildCfg,
+		cfg:                bCtx,
+		skipTests:          bCtx.SkipTests(),
+		muted:              bCtx.Muted(),
+		artifactStore:      bCtx.ArtifactStore(),
+		sourceDependencies: bCtx.SourceDependenciesResolver(),
 	}
 }
 
 func (b *Builder) Prune(ctx context.Context, out io.Writer) error {
 	return nil // noop
+}
+
+func (b *Builder) PushImages() bool {
+	return true
+}
+
+func (b *Builder) SupportedPlatforms() platform.Matcher {
+	return platform.All
 }

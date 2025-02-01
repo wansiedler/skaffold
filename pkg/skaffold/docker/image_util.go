@@ -22,12 +22,11 @@ import (
 	"strings"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/sirupsen/logrus"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
 )
 
-func RetrieveConfigFile(tagged string, insecureRegistries map[string]bool) (*v1.ConfigFile, error) {
+func RetrieveConfigFile(ctx context.Context, tagged string, cfg Config) (*v1.ConfigFile, error) {
 	if strings.ToLower(tagged) == "scratch" {
 		return nil, nil
 	}
@@ -35,14 +34,13 @@ func RetrieveConfigFile(tagged string, insecureRegistries map[string]bool) (*v1.
 	var cf *v1.ConfigFile
 	var err error
 
-	// TODO: use the proper RunContext
-	localDocker, err := NewAPIClient(&runcontext.RunContext{})
+	localDocker, err := NewAPIClient(ctx, cfg)
 	if err == nil {
 		cf, err = localDocker.ConfigFile(context.Background(), tagged)
 	}
 	if err != nil {
 		// No local Docker is available
-		cf, err = RetrieveRemoteConfig(tagged, insecureRegistries)
+		cf, err = RetrieveRemoteConfig(tagged, cfg, v1.Platform{})
 	}
 	if err != nil {
 		return nil, fmt.Errorf("retrieving image config: %w", err)
@@ -51,23 +49,23 @@ func RetrieveConfigFile(tagged string, insecureRegistries map[string]bool) (*v1.
 	return cf, err
 }
 
-func RetrieveWorkingDir(tagged string, insecureRegistries map[string]bool) (string, error) {
-	cf, err := RetrieveConfigFile(tagged, insecureRegistries)
+func RetrieveWorkingDir(ctx context.Context, tagged string, cfg Config) (string, error) {
+	cf, err := RetrieveConfigFile(ctx, tagged, cfg)
 	switch {
 	case err != nil:
 		return "", err
 	case cf == nil:
 		return "/", nil
 	case cf.Config.WorkingDir == "":
-		logrus.Debugf("Using default workdir '/' for %s", tagged)
+		log.Entry(context.TODO()).Debugf("Using default workdir '/' for %s", tagged)
 		return "/", nil
 	default:
 		return cf.Config.WorkingDir, nil
 	}
 }
 
-func RetrieveLabels(tagged string, insecureRegistries map[string]bool) (map[string]string, error) {
-	cf, err := RetrieveConfigFile(tagged, insecureRegistries)
+func RetrieveLabels(ctx context.Context, tagged string, cfg Config) (map[string]string, error) {
+	cf, err := RetrieveConfigFile(ctx, tagged, cfg)
 	switch {
 	case err != nil:
 		return nil, err

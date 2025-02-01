@@ -17,14 +17,18 @@ limitations under the License.
 package jib
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/docker/docker/client"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestGetDependencies(t *testing.T) {
@@ -103,7 +107,7 @@ func TestGetDependencies(t *testing.T) {
 				test.stdout,
 			))
 
-			results, err := getDependencies(tmpDir.Root(), exec.Cmd{Args: []string{"ignored"}, Dir: tmpDir.Root()}, &latest.JibArtifact{Project: util.RandomID()})
+			results, err := getDependencies(context.Background(), tmpDir.Root(), exec.Cmd{Args: []string{"ignored"}, Dir: tmpDir.Root()}, &latest.JibArtifact{Project: util.RandomID()})
 
 			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expectedDeps, results)
 		})
@@ -125,7 +129,7 @@ func TestGetUpdatedDependencies(t *testing.T) {
 		artifact := &latest.JibArtifact{Project: util.RandomID()}
 
 		// List dependencies
-		_, err := getDependencies(tmpDir.Root(), listCmd, artifact)
+		_, err := getDependencies(context.Background(), tmpDir.Root(), listCmd, artifact)
 		t.CheckNoError(err)
 
 		// Create new build definition files
@@ -134,7 +138,7 @@ func TestGetUpdatedDependencies(t *testing.T) {
 			Write("settings.gradle", "")
 
 		// Update dependencies
-		_, err = getDependencies(tmpDir.Root(), listCmd, artifact)
+		_, err = getDependencies(context.Background(), tmpDir.Root(), listCmd, artifact)
 		t.CheckNoError(err)
 	})
 }
@@ -151,9 +155,9 @@ func TestPluginType_IsKnown(t *testing.T) {
 	}{
 		{JibMaven, true},
 		{JibGradle, true},
-		{PluginType(0), false},
-		{PluginType(-1), false},
-		{PluginType(3), false},
+		{PluginType("ant"), false},
+		{PluginType("make"), false},
+		{PluginType(""), false},
 	}
 	for _, test := range tests {
 		testutil.Run(t, string(test.value), func(t *testutil.T) {
@@ -187,7 +191,7 @@ func TestDeterminePluginType(t *testing.T) {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			buildDir := t.NewTempDir()
 			buildDir.Touch(test.files...)
-			PluginType, err := DeterminePluginType(buildDir.Root(), test.artifact)
+			PluginType, err := DeterminePluginType(context.Background(), buildDir.Root(), test.artifact)
 			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.PluginType, PluginType)
 		})
 	}
@@ -217,4 +221,8 @@ func TestGetProjectKey(t *testing.T) {
 		projectKey := getProjectKey(test.workspace, test.artifact)
 		testutil.CheckDeepEqual(t, test.expected, projectKey)
 	}
+}
+
+func fakeLocalDaemon(api client.CommonAPIClient) docker.LocalDaemon {
+	return docker.NewLocalDaemon(api, nil, false, nil)
 }

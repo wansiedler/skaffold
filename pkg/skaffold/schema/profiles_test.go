@@ -23,22 +23,22 @@ import (
 	yamlpatch "github.com/krishicks/yaml-patch"
 	"k8s.io/client-go/tools/clientcmd/api"
 
-	cfg "github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
-	kubectx "github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes/context"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/kaniko"
+	cfg "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	kubectx "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/context"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/parser/configlocations"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestApplyPatch(t *testing.T) {
 	config := `build:
   artifacts:
   - image: example
-deploy:
-  kubectl:
-    manifests:
-    - k8s-*
+manifests:
+  rawYaml:
+  - k8s-*
 profiles:
 - name: patches
   patches:
@@ -54,8 +54,16 @@ profiles:
       image: second
       docker:
         dockerfile: Dockerfile.second
+  - op: add
+    path: /build/artifacts/-
+    value:
+      image: third
+  - op: replace
+    path: /build/artifacts/2
+    value:
+      image: third-replaced
   - op: remove
-    path: /deploy
+    path: /manifests
 `
 
 	testutil.Run(t, "", func(t *testutil.T) {
@@ -65,16 +73,16 @@ profiles:
 
 		parsed, err := ParseConfig(tmpDir.Path("skaffold.yaml"))
 		t.CheckNoError(err)
+		t.CheckTrue(len(parsed) > 0)
 
-		skaffoldConfig := parsed.(*latest.SkaffoldConfig)
-		err = ApplyProfiles(skaffoldConfig, cfg.SkaffoldOptions{
-			Profiles: []string{"patches"},
-		})
-
+		skaffoldConfig := parsed[0].(*latest.SkaffoldConfig)
+		activated, _, err := ApplyProfiles(skaffoldConfig, map[string]configlocations.YAMLOverrideInfo{}, cfg.SkaffoldOptions{}, []string{"patches"})
 		t.CheckNoError(err)
+		t.CheckDeepEqual([]string{"patches"}, activated)
 		t.CheckDeepEqual("replacement", skaffoldConfig.Build.Artifacts[0].ImageName)
 		t.CheckDeepEqual("Dockerfile.DEV", skaffoldConfig.Build.Artifacts[0].DockerArtifact.DockerfilePath)
 		t.CheckDeepEqual("Dockerfile.second", skaffoldConfig.Build.Artifacts[1].DockerArtifact.DockerfilePath)
+		t.CheckDeepEqual("third-replaced", skaffoldConfig.Build.Artifacts[2].ImageName)
 		t.CheckDeepEqual(latest.DeployConfig{}, skaffoldConfig.Deploy)
 	})
 }
@@ -96,12 +104,10 @@ profiles:
 
 		parsed, err := ParseConfig(tmp.Path("skaffold.yaml"))
 		t.CheckNoError(err)
+		t.CheckTrue(len(parsed) > 0)
 
-		skaffoldConfig := parsed.(*latest.SkaffoldConfig)
-		err = ApplyProfiles(skaffoldConfig, cfg.SkaffoldOptions{
-			Profiles: []string{"patches"},
-		})
-
+		skaffoldConfig := parsed[0].(*latest.SkaffoldConfig)
+		_, _, err = ApplyProfiles(skaffoldConfig, map[string]configlocations.YAMLOverrideInfo{}, cfg.SkaffoldOptions{}, []string{"patches"})
 		t.CheckErrorAndDeepEqual(true, err, `applying profile "patches": invalid path: /build/artifacts/0/image/`, err.Error())
 	})
 }
@@ -117,12 +123,6 @@ func TestApplyProfiles(t *testing.T) {
 		shouldErr                bool
 	}{
 		{
-			description: "unknown profile",
-			config:      config(),
-			profile:     "profile",
-			shouldErr:   true,
-		},
-		{
 			description:              "build type",
 			profile:                  "profile",
 			profileAutoActivationCli: true,
@@ -131,7 +131,7 @@ func TestApplyProfiles(t *testing.T) {
 					withGitTagger(),
 					withDockerArtifact("image", ".", "Dockerfile"),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 				withProfiles(latest.Profile{
 					Name: "profile",
 					Pipeline: latest.Pipeline{
@@ -142,8 +142,9 @@ func TestApplyProfiles(t *testing.T) {
 									DockerImage: "gcr.io/cloud-builders/docker",
 									MavenImage:  "gcr.io/cloud-builders/mvn",
 									GradleImage: "gcr.io/cloud-builders/gradle",
-									KanikoImage: constants.DefaultKanikoImage,
+									KanikoImage: kaniko.DefaultImage,
 									PackImage:   "gcr.io/k8s-skaffold/pack",
+									KoImage:     "gcr.io/k8s-skaffold/skaffold",
 								},
 							},
 						},
@@ -155,7 +156,7 @@ func TestApplyProfiles(t *testing.T) {
 					withGitTagger(),
 					withDockerArtifact("image", ".", "Dockerfile"),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 			),
 		},
 		{
@@ -167,7 +168,7 @@ func TestApplyProfiles(t *testing.T) {
 					withGitTagger(),
 					withDockerArtifact("image", ".", "Dockerfile"),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 				withProfiles(latest.Profile{
 					Name: "dev",
 					Pipeline: latest.Pipeline{
@@ -182,7 +183,7 @@ func TestApplyProfiles(t *testing.T) {
 					withShaTagger(),
 					withDockerArtifact("image", ".", "Dockerfile"),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 			),
 		},
 		{
@@ -194,7 +195,7 @@ func TestApplyProfiles(t *testing.T) {
 					withGitTagger(),
 					withDockerArtifact("image", ".", "Dockerfile"),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 				withProfiles(latest.Profile{
 					Name: "profile",
 					Pipeline: latest.Pipeline{
@@ -221,7 +222,7 @@ func TestApplyProfiles(t *testing.T) {
 					withDockerArtifact("image", ".", "Dockerfile.DEV"),
 					withDockerArtifact("imageProd", ".", "Dockerfile.DEV"),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 			),
 		},
 		{
@@ -232,13 +233,13 @@ func TestApplyProfiles(t *testing.T) {
 				withLocalBuild(
 					withGitTagger(),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 				withProfiles(latest.Profile{
 					Name: "profile",
 					Pipeline: latest.Pipeline{
 						Deploy: latest.DeployConfig{
 							DeployType: latest.DeployType{
-								HelmDeploy: &latest.HelmDeploy{},
+								LegacyHelmDeploy: &latest.LegacyHelmDeploy{},
 							},
 						},
 					},
@@ -249,7 +250,7 @@ func TestApplyProfiles(t *testing.T) {
 					withGitTagger(),
 				),
 				withHelmDeploy(),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 			),
 		},
 		{
@@ -261,7 +262,7 @@ func TestApplyProfiles(t *testing.T) {
 					withGitTagger(),
 					withDockerArtifact("image", ".", "Dockerfile"),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 				withProfiles(latest.Profile{
 					Name: "profile",
 					Patches: []latest.JSONPatch{{
@@ -275,7 +276,7 @@ func TestApplyProfiles(t *testing.T) {
 					withGitTagger(),
 					withDockerArtifact("image", ".", "Dockerfile.DEV"),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 			),
 		},
 		{
@@ -287,7 +288,7 @@ func TestApplyProfiles(t *testing.T) {
 					withGitTagger(),
 					withDockerArtifact("image", ".", "Dockerfile"),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 				withProfiles(latest.Profile{
 					Name: "profile",
 					Patches: []latest.JSONPatch{{
@@ -341,7 +342,7 @@ func TestApplyProfiles(t *testing.T) {
 							Namespace: "ns",
 							Name:      "name",
 							Type:      "service",
-							Port:      8080,
+							Port:      util.FromInt(8080),
 							LocalPort: 8888,
 						}},
 					},
@@ -355,7 +356,7 @@ func TestApplyProfiles(t *testing.T) {
 					Namespace: "ns",
 					Name:      "name",
 					Type:      "service",
-					Port:      8080,
+					Port:      util.FromInt(8080),
 					LocalPort: 8888,
 				}),
 			),
@@ -431,7 +432,7 @@ func TestApplyProfiles(t *testing.T) {
 					withGitTagger(),
 					withDockerArtifact("image", ".", "Dockerfile"),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 				withProfiles(latest.Profile{
 					Name: "dev",
 				},
@@ -450,7 +451,7 @@ func TestApplyProfiles(t *testing.T) {
 					withShaTagger(),
 					withDockerArtifact("image", ".", "Dockerfile"),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 			),
 		},
 		{
@@ -462,7 +463,7 @@ func TestApplyProfiles(t *testing.T) {
 					withGitTagger(),
 					withDockerArtifact("image", ".", "Dockerfile"),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 				withProfiles(latest.Profile{
 					Name: "dev",
 				},
@@ -481,18 +482,18 @@ func TestApplyProfiles(t *testing.T) {
 					withGitTagger(),
 					withDockerArtifact("image", ".", "Dockerfile"),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
+				withRawK8s("k8s/*.yaml"),
 			),
 		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			setupFakeKubeConfig(t, api.Config{CurrentContext: "prod-context"})
-			err := ApplyProfiles(test.config, cfg.SkaffoldOptions{
-				Profiles:              []string{test.profile},
+			_, _, err := ApplyProfiles(test.config, map[string]configlocations.YAMLOverrideInfo{}, cfg.SkaffoldOptions{
+				Command:               "dev",
 				KubeContext:           test.kubeContextCli,
 				ProfileAutoActivation: test.profileAutoActivationCli,
-			})
+			}, []string{test.profile})
 
 			if test.shouldErr {
 				t.CheckError(test.shouldErr, err)
@@ -556,6 +557,20 @@ func TestActivatedProfiles(t *testing.T) {
 			},
 			expected: []string{"activated", "also-activated", "regex-activated", "regex-activated-two", "regex-activated-substring-match"},
 		}, {
+			description: "Profile with multiple valid activations",
+			envs:        map[string]string{"KEY": "VALUE"},
+			opts: cfg.SkaffoldOptions{
+				ProfileAutoActivation: true,
+				Command:               "dev",
+				Profiles:              []string{"activated", "also-activated"},
+			},
+			profiles: []latest.Profile{
+				{Name: "activated", Activation: []latest.Activation{{Env: "KEY=VALUE"}, {Command: "dev"}}},
+				{Name: "not-activated", Activation: []latest.Activation{{Env: "KEY=OTHER"}}},
+				{Name: "also-activated", Activation: []latest.Activation{{Env: "KEY=!OTHER"}}},
+			},
+			expected: []string{"activated", "also-activated"},
+		}, {
 			description: "Invalid env variable",
 			envs:        map[string]string{"KEY": "VALUE"},
 			opts: cfg.SkaffoldOptions{
@@ -615,6 +630,53 @@ func TestActivatedProfiles(t *testing.T) {
 						Command: "run",
 					}, {
 						Command: "dev",
+					}},
+				},
+			},
+			expected: []string{"activated"},
+		},
+		{
+			description: "AND between activations",
+			envs:        map[string]string{"KEY": "VALUE"},
+			opts: cfg.SkaffoldOptions{
+				ProfileAutoActivation: true,
+				Command:               "dev",
+			},
+			profiles: []latest.Profile{
+				{
+					Name: "activated", RequiresAllActivations: true, Activation: []latest.Activation{{
+						Command: "dev",
+					}, {
+						Env: "KEY=VALUE",
+					}, {
+						KubeContext: "prod-context",
+					}},
+				},
+				{
+					Name: "command-mismatched", RequiresAllActivations: true, Activation: []latest.Activation{{
+						Command: "run",
+					}, {
+						Env: "KEY=VALUE",
+					}, {
+						KubeContext: "prod-context",
+					}},
+				},
+				{
+					Name: "env-mismatched", RequiresAllActivations: true, Activation: []latest.Activation{{
+						Command: "dev",
+					}, {
+						Env: "KEY=VALUE_2",
+					}, {
+						KubeContext: "prod-context",
+					}},
+				},
+				{
+					Name: "kubecontext-mismatched", RequiresAllActivations: true, Activation: []latest.Activation{{
+						Command: "dev",
+					}, {
+						Env: "KEY=VALUE",
+					}, {
+						KubeContext: "staging",
 					}},
 				},
 			},
@@ -711,6 +773,8 @@ func TestActivatedProfiles(t *testing.T) {
 				Profiles:              []string{"activated", "also-activated"},
 			},
 			profiles: []latest.Profile{
+				{Name: "activated"},
+				{Name: "also-activated"},
 				{Name: "run-profile", Activation: []latest.Activation{{Command: "run"}}},
 			},
 			expected: []string{"run-profile", "activated", "also-activated"},
@@ -751,7 +815,7 @@ func TestActivatedProfiles(t *testing.T) {
 			t.SetEnvs(test.envs)
 			t.SetupFakeKubernetesContext(api.Config{CurrentContext: "prod-context"})
 
-			activated, _, err := activatedProfiles(test.profiles, test.opts)
+			activated, _, err := activatedProfiles(test.profiles, test.opts, test.opts.Profiles)
 
 			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expected, activated)
 		})
@@ -788,8 +852,9 @@ profiles:
 
 		parsed, err := ParseConfig(tmpDir.Path("skaffold.yaml"))
 		t.RequireNoError(err)
+		t.CheckTrue(len(parsed) > 0)
 
-		skaffoldConfig := parsed.(*latest.SkaffoldConfig)
+		skaffoldConfig := parsed[0].(*latest.SkaffoldConfig)
 
 		t.CheckDeepEqual(2, len(skaffoldConfig.Profiles))
 		t.CheckDeepEqual("simple1", skaffoldConfig.Profiles[0].Name)
@@ -797,11 +862,9 @@ profiles:
 		t.CheckDeepEqual("simple2", skaffoldConfig.Profiles[1].Name)
 		t.CheckDeepEqual([]latest.Activation{{Env: "ABC=common"}, {Env: "ABC=2"}}, skaffoldConfig.Profiles[1].Activation)
 
-		err = ApplyProfiles(skaffoldConfig, cfg.SkaffoldOptions{
-			Profiles: []string{"simple1"},
-		})
+		applied, _, err := ApplyProfiles(skaffoldConfig, map[string]configlocations.YAMLOverrideInfo{}, cfg.SkaffoldOptions{}, []string{"simple1"})
 		t.CheckNoError(err)
-
+		t.CheckDeepEqual([]string{"simple1"}, applied)
 		t.CheckDeepEqual(1, len(skaffoldConfig.Build.Artifacts))
 		t.CheckDeepEqual(latest.Artifact{ImageName: "simpleimage1"}, *skaffoldConfig.Build.Artifacts[0])
 	})

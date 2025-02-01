@@ -18,11 +18,11 @@ package main
 
 import (
 	"bytes"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestPrintMan(t *testing.T) {
@@ -40,13 +40,13 @@ func TestPrintMan(t *testing.T) {
 	testutil.CheckContains(t, "Env vars", output)
 
 	// Compare to current man page
-	header, err := ioutil.ReadFile(filepath.Join("..", "..", "docs", "content", "en", "docs", "references", "cli", "index_header"))
+	header, err := os.ReadFile(filepath.Join("..", "..", "docs-v2", "content", "en", "docs", "references", "cli", "index_header"))
 	testutil.CheckError(t, false, err)
-	header = bytes.Replace(header, []byte("\r\n"), []byte("\n"), -1)
+	header = bytes.ReplaceAll(header, []byte("\r\n"), []byte("\n"))
 
-	expected, err := ioutil.ReadFile(filepath.Join("..", "..", "docs", "content", "en", "docs", "references", "cli", "_index.md"))
+	expected, err := os.ReadFile(filepath.Join("..", "..", "docs-v2", "content", "en", "docs", "references", "cli", "_index.md"))
 	testutil.CheckError(t, false, err)
-	expected = bytes.Replace(expected, []byte("\r\n"), []byte("\n"), -1)
+	expected = bytes.ReplaceAll(expected, []byte("\r\n"), []byte("\n"))
 
 	if string(expected) != string(header)+output {
 		t.Error("You have skaffold command changes but haven't generated the CLI reference docs. Please run ./hack/generate-man.sh and commit the results!")

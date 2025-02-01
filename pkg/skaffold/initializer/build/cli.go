@@ -20,21 +20,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/buildpacks"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/jib"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/initializer/errors"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/buildpacks"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/jib"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/initializer/errors"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/generator"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
 )
 
 type cliBuildInitializer struct {
-	cliArtifacts      []string
-	builderImagePairs []BuilderImagePair
-	builders          []InitBuilder
-	skipBuild         bool
-	enableNewFormat   bool
+	cliArtifacts    []string
+	artifactInfos   []ArtifactInfo
+	manifests       []*generator.Container
+	builders        []InitBuilder
+	skipBuild       bool
+	enableNewFormat bool
 }
 
 func (c *cliBuildInitializer) ProcessImages(images []string) error {
@@ -47,18 +51,56 @@ func (c *cliBuildInitializer) ProcessImages(images []string) error {
 	return nil
 }
 
-func (c *cliBuildInitializer) BuildConfig() latest.BuildConfig {
-	return latest.BuildConfig{
-		Artifacts: Artifacts(c.builderImagePairs),
+func (c *cliBuildInitializer) BuildConfig() (latest.BuildConfig, []*latest.PortForwardResource) {
+	pf := []*latest.PortForwardResource{}
+
+	for _, manifestInfo := range c.manifests {
+		// Port value is set to 0 if user decides to not port forward service
+		if manifestInfo.Port != 0 {
+			pf = append(pf, &latest.PortForwardResource{
+				Type: "service",
+				Name: manifestInfo.Name,
+				Port: util.FromInt(manifestInfo.Port),
+			})
+		}
 	}
+
+	return latest.BuildConfig{
+		Artifacts: Artifacts(c.artifactInfos),
+	}, pf
 }
 
 func (c *cliBuildInitializer) PrintAnalysis(out io.Writer) error {
-	return printAnalysis(out, c.enableNewFormat, c.skipBuild, c.builderImagePairs, c.builders, nil)
+	return printAnalysis(out, c.enableNewFormat, c.skipBuild, c.artifactInfos, c.builders, nil)
 }
 
-func (c *cliBuildInitializer) GenerateManifests() (map[GeneratedBuilderImagePair][]byte, error) {
-	return nil, nil
+func (c *cliBuildInitializer) GenerateManifests(_ io.Writer, _, enableManifestGeneration bool) (map[GeneratedArtifactInfo][]byte, error) {
+	generatedManifests := map[GeneratedArtifactInfo][]byte{}
+
+	artifactWithManifests := false
+	for _, info := range c.artifactInfos {
+		if info.Manifest.Generate {
+			artifactWithManifests = true
+		}
+	}
+	if !enableManifestGeneration && !artifactWithManifests {
+		return generatedManifests, nil
+	}
+	for _, info := range c.artifactInfos {
+		if info.Manifest.Generate {
+			generatedInfo := GeneratedArtifactInfo{
+				ArtifactInfo: info,
+				ManifestPath: filepath.Join(filepath.Dir(info.Builder.Path()), "deployment.yaml"),
+			}
+			manifest, manifestInfo, err := generator.Generate(info.ImageName, info.Manifest.Port)
+			if err != nil {
+				return nil, fmt.Errorf("generating kubernetes manifest: %w", err)
+			}
+			generatedManifests[generatedInfo] = manifest
+			c.manifests = append(c.manifests, manifestInfo)
+		}
+	}
+	return generatedManifests, nil
 }
 
 func (c *cliBuildInitializer) processCliArtifacts() error {
@@ -66,19 +108,26 @@ func (c *cliBuildInitializer) processCliArtifacts() error {
 	if err != nil {
 		return err
 	}
-	c.builderImagePairs = pairs
+	c.artifactInfos = pairs
 	return nil
 }
 
-func processCliArtifacts(cliArtifacts []string) ([]BuilderImagePair, error) {
-	var pairs []BuilderImagePair
+func processCliArtifacts(cliArtifacts []string) ([]ArtifactInfo, error) {
+	var artifactInfos []ArtifactInfo
 	for _, artifact := range cliArtifacts {
-		// Parses JSON in the form of: {"builder":"Name of Builder","payload":{...},"image":"image.name"}.
-		// The builder field is parsed first to determine the builder type, and the payload is parsed
-		// afterwards once the type is determined.
+		// Parses artifacts in 1 of 2 forms:
+		// 1. JSON in the form of: {"builder":"Name of Builder","payload":{...},"image":"image.name","context":"artifact.context"}.
+		//    The builder field is parsed first to determine the builder type, and the payload is parsed
+		//    afterwards once the type is determined.
+		// 2. Key-value pair: `path/to/Dockerfile=imageName` (deprecated, historical, Docker-only)
 		a := struct {
-			Name  string `json:"builder"`
-			Image string `json:"image"`
+			Name      string `json:"builder"`
+			Image     string `json:"image"`
+			Workspace string `json:"context"`
+			Manifest  struct {
+				Generate bool `json:"generate"`
+				Port     int  `json:"port"`
+			} `json:"manifest"`
 		}{}
 		if err := json.Unmarshal([]byte(artifact), &a); err != nil {
 			// Not JSON, use backwards compatible method
@@ -86,11 +135,15 @@ func processCliArtifacts(cliArtifacts []string) ([]BuilderImagePair, error) {
 			if len(parts) != 2 {
 				return nil, fmt.Errorf("malformed artifact provided: %s", artifact)
 			}
-			pairs = append(pairs, BuilderImagePair{
+			artifactInfos = append(artifactInfos, ArtifactInfo{
 				Builder:   docker.ArtifactConfig{File: parts[0]},
 				ImageName: parts[1],
 			})
 			continue
+		}
+		manifestInfo := ManifestInfo{
+			Generate: a.Manifest.Generate,
+			Port:     a.Manifest.Port,
 		}
 
 		// Use builder type to parse payload
@@ -102,8 +155,8 @@ func processCliArtifacts(cliArtifacts []string) ([]BuilderImagePair, error) {
 			if err := json.Unmarshal([]byte(artifact), &parsed); err != nil {
 				return nil, err
 			}
-			pair := BuilderImagePair{Builder: parsed.Payload, ImageName: a.Image}
-			pairs = append(pairs, pair)
+			info := ArtifactInfo{Builder: parsed.Payload, ImageName: a.Image, Workspace: a.Workspace, Manifest: manifestInfo}
+			artifactInfos = append(artifactInfos, info)
 
 		// FIXME: shouldn't use a human-readable name?
 		case jib.PluginName(jib.JibGradle), jib.PluginName(jib.JibMaven):
@@ -114,8 +167,8 @@ func processCliArtifacts(cliArtifacts []string) ([]BuilderImagePair, error) {
 				return nil, err
 			}
 			parsed.Payload.BuilderName = a.Name
-			pair := BuilderImagePair{Builder: parsed.Payload, ImageName: a.Image}
-			pairs = append(pairs, pair)
+			info := ArtifactInfo{Builder: parsed.Payload, ImageName: a.Image, Workspace: a.Workspace, Manifest: manifestInfo}
+			artifactInfos = append(artifactInfos, info)
 
 		case buildpacks.Name:
 			parsed := struct {
@@ -124,12 +177,16 @@ func processCliArtifacts(cliArtifacts []string) ([]BuilderImagePair, error) {
 			if err := json.Unmarshal([]byte(artifact), &parsed); err != nil {
 				return nil, err
 			}
-			pair := BuilderImagePair{Builder: parsed.Payload, ImageName: a.Image}
-			pairs = append(pairs, pair)
+			info := ArtifactInfo{Builder: parsed.Payload, ImageName: a.Image, Workspace: a.Workspace, Manifest: manifestInfo}
+			artifactInfos = append(artifactInfos, info)
+
+		case "None":
+			info := ArtifactInfo{Builder: NoneBuilder{}, ImageName: a.Image, Manifest: manifestInfo}
+			artifactInfos = append(artifactInfos, info)
 
 		default:
 			return nil, fmt.Errorf("unknown builder type in CLI artifacts: %q", a.Name)
 		}
 	}
-	return pairs, nil
+	return artifactInfos, nil
 }

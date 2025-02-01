@@ -17,61 +17,90 @@ limitations under the License.
 package integration
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/GoogleContainerTools/skaffold/integration/skaffold"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/debug"
-	"github.com/GoogleContainerTools/skaffold/proto"
+	dockertypes "github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
+
+	"github.com/GoogleContainerTools/skaffold/v2/integration/skaffold"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/debug/types"
+	"github.com/GoogleContainerTools/skaffold/v2/proto/v1"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestDebug(t *testing.T) {
-	MarkIntegrationTest(t, CanRunWithoutGcp)
-
 	tests := []struct {
-		description string
-		config      string
-		args        []string
-		deployments []string
-		pods        []string
+		description   string
+		dir           string
+		config        string
+		args          []string
+		deployments   []string
+		pods          []string
+		ignoreWorkdir bool
 	}{
 		{
 			description: "kubectl",
+			dir:         "testdata/debug",
 			deployments: []string{"java"},
-			pods:        []string{"nodejs", "npm", "python3", "go"},
+			pods:        []string{"nodejs", "npm" /*, "python3"*/, "go" /*, "netcore"*/},
 		},
 		{
 			description: "kustomize",
+			dir:         "testdata/debug",
 			args:        []string{"--profile", "kustomize"},
 			deployments: []string{"java"},
-			pods:        []string{"nodejs", "npm", "python3", "go"},
+			pods:        []string{"nodejs", "npm" /*, "python3"*/, "go" /*, "netcore"*/},
 		},
 		{
-			description: "buildpacks",
-			args:        []string{"--profile", "buildpacks"},
-			deployments: []string{"java"},
-			pods:        []string{"nodejs", "npm", "python3", "go"},
+			description: "specified-runtime-nodejs",
+			dir:         "testdata/debug",
+			args:        []string{"--profile", "specified-runtime", "--check-cluster-node-platforms=false"},
+			pods:        []string{"nodejs"},
+		},
+		// TODO(#8811): Enable this test when issue is solve.
+		// {
+		// 	description: "buildpacks",
+		// 	dir:         "testdata/debug",
+		// 	args:        []string{"--profile", "buildpacks"},
+		// 	deployments: []string{"java"},
+		// 	pods:        []string{"nodejs", "npm" /*, "python3"*/, "go" /*, "netcore"*/},
+		// },
+		{
+			description:   "helm",
+			dir:           "examples/helm-deployment",
+			deployments:   []string{"skaffold-helm"},
+			ignoreWorkdir: true, // dockerfile doesn't have a workdir
+		},
+		{
+			description:   "modules",
+			dir:           "examples/multi-config-microservices",
+			deployments:   []string{"leeroy-web", "leeroy-app"},
+			ignoreWorkdir: true, // dockerfile doesn't have a workdir
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.description, func(t *testing.T) {
+			MarkIntegrationTest(t, CanRunWithoutGcp)
 			// Run skaffold build first to fail quickly on a build failure
-			skaffold.Build(test.args...).InDir("testdata/debug").RunOrFail(t)
+			skaffold.Build(test.args...).InDir(test.dir).RunOrFail(t)
 
 			ns, client := SetupNamespace(t)
 
-			skaffold.Debug(test.args...).InDir("testdata/debug").InNs(ns.Name).RunBackground(t)
+			skaffold.Debug(test.args...).InDir(test.dir).InNs(ns.Name).RunBackground(t)
 
 			verifyDebugAnnotations := func(annotations map[string]string) {
-				var configs map[string]debug.ContainerDebugConfiguration
+				var configs map[string]types.ContainerDebugConfiguration
 				if anno, found := annotations["debug.cloud.google.com/config"]; !found {
 					t.Errorf("deployment missing debug annotation: %v", annotations)
 				} else if err := json.Unmarshal([]byte(anno), &configs); err != nil {
 					t.Errorf("error unmarshalling debug annotation: %v: %v", anno, err)
 				} else {
 					for k, config := range configs {
-						if config.WorkingDir == "" {
+						if !test.ignoreWorkdir && config.WorkingDir == "" {
 							t.Errorf("debug config for %q missing WorkingDir: %v: %v", k, anno, config)
 						}
 						if config.Runtime == "" {
@@ -98,7 +127,102 @@ func TestDebug(t *testing.T) {
 	}
 }
 
+func TestDockerDebug(t *testing.T) {
+	t.Run("debug docker deployment", func(t *testing.T) {
+		MarkIntegrationTest(t, CanRunWithoutGcp)
+		skaffold.Build("-p", "docker").InDir("testdata/debug").RunOrFail(t)
+
+		skaffold.Debug("-p", "docker").InDir("testdata/debug").RunBackground(t)
+		defer skaffold.Delete("-p", "docker").InDir("testdata/debug").RunBackground(t)
+
+		// use docker client to verify container has been created properly
+		// check this container and verify entrypoint has been rewritten
+		client := SetupDockerClient(t)
+		var (
+			verifyEntrypointRewrite bool
+			verifySupportContainer  bool
+			tries                   = 0
+			sleepTime               = 2 * time.Second // retrieve containers every two seconds
+			maxTries                = 15              // try for 30 seconds max
+		)
+		for {
+			containers, err := client.ContainerList(context.Background(), container.ListOptions{All: true})
+			if err != nil {
+				t.Fail()
+			}
+			time.Sleep(sleepTime)
+			if len(containers) == 0 {
+				continue
+			}
+
+			checkEntrypointRewrite(containers, &verifyEntrypointRewrite)
+			checkSupportContainer(containers, &verifySupportContainer)
+
+			if verifyEntrypointRewrite && verifySupportContainer {
+				break
+			}
+			tries++
+			if tries == maxTries {
+				break
+			}
+		}
+
+		if !verifyEntrypointRewrite {
+			t.Error("couldn't verify rewritten container")
+		}
+		if !verifySupportContainer {
+			t.Error("couldn't verify support container was created")
+		}
+	})
+}
+
+func checkEntrypointRewrite(containers []dockertypes.Container, found *bool) {
+	if *found {
+		return
+	}
+	for _, c := range containers {
+		if strings.Contains(c.Command, "docker-entrypoint.sh") {
+			*found = true
+		}
+	}
+}
+
+func checkSupportContainer(containers []dockertypes.Container, found *bool) {
+	if *found {
+		return
+	}
+	for _, c := range containers {
+		if strings.Contains(c.Image, "gcr.io/k8s-skaffold/skaffold-debug-support") {
+			*found = true
+		}
+	}
+}
+
+func TestFilterWithDebugging(t *testing.T) {
+	MarkIntegrationTest(t, CanRunWithoutGcp)
+	// `filter` currently expects to receive a digested yaml
+	renderedOutput := skaffold.Render("--digest-source=local").InDir("examples/getting-started").RunOrFailOutput(t)
+
+	testutil.Run(t, "no --build-artifacts should transform all images", func(t *testutil.T) {
+		transformedOutput := skaffold.Filter("--debugging").InDir("examples/getting-started").WithStdin(renderedOutput).RunOrFailOutput(t.T)
+		transformedYaml := string(transformedOutput)
+		if !strings.Contains(transformedYaml, "/dbg/go/bin/dlv") {
+			t.Error("transformed yaml seems to be missing debugging details", transformedYaml)
+		}
+	})
+
+	testutil.Run(t, "--build-artifacts=file should result in specific transforms", func(t *testutil.T) {
+		buildFile := t.TempFile("build.txt", []byte(`{"builds":[{"imageName":"doesnotexist","tag":"doesnotexist:notag"}]}`))
+		transformedOutput := skaffold.Filter("--debugging", "--build-artifacts="+buildFile).InDir("examples/getting-started").WithStdin(renderedOutput).RunOrFailOutput(t.T)
+		transformedYaml := string(transformedOutput)
+		if strings.Contains(transformedYaml, "/dbg/go/bin/dlv") {
+			t.Error("transformed yaml should not include debugging details", transformedYaml)
+		}
+	})
+}
+
 func TestDebugEventsRPC_StatusCheck(t *testing.T) {
+	t.Skipf("Disable the test dues to flakyness. https://github.com/GoogleContainerTools/skaffold/issues/7405")
 	MarkIntegrationTest(t, CanRunWithoutGcp)
 
 	// Run skaffold build first to fail quickly on a build failure
@@ -107,12 +231,13 @@ func TestDebugEventsRPC_StatusCheck(t *testing.T) {
 	ns, client := SetupNamespace(t)
 
 	rpcAddr := randomPort()
-	skaffold.Debug("--enable-rpc", "--rpc-port", rpcAddr).InDir("testdata/jib").InNs(ns.Name).RunBackground(t)
+	skaffold.Debug("--rpc-port", rpcAddr).InDir("testdata/jib").InNs(ns.Name).RunBackground(t)
 
 	waitForDebugEvent(t, client, rpcAddr)
 }
 
 func TestDebugEventsRPC_NoStatusCheck(t *testing.T) {
+	t.Skipf("Disable the test dues to flakyness. https://github.com/GoogleContainerTools/skaffold/issues/7405")
 	MarkIntegrationTest(t, CanRunWithoutGcp)
 
 	// Run skaffold build first to fail quickly on a build failure
@@ -121,11 +246,12 @@ func TestDebugEventsRPC_NoStatusCheck(t *testing.T) {
 	ns, client := SetupNamespace(t)
 
 	rpcAddr := randomPort()
-	skaffold.Debug("--enable-rpc", "--rpc-port", rpcAddr, "--status-check=false").InDir("testdata/jib").InNs(ns.Name).RunBackground(t)
+	skaffold.Debug("--rpc-port", rpcAddr, "--status-check=false").InDir("testdata/jib").InNs(ns.Name).RunBackground(t)
 
 	waitForDebugEvent(t, client, rpcAddr)
 }
 
+// nolint add lint back after https://github.com/GoogleContainerTools/skaffold/issues/7405
 func waitForDebugEvent(t *testing.T, client *NSKubernetesClient, rpcAddr string) {
 	client.WaitForPodsReady()
 

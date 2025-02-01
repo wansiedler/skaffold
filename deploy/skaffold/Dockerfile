@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This base image has to be updated manually after running `make build_deps`
-FROM gcr.io/k8s-skaffold/build_deps:8061be2a8192708bf4c51bc4a5663fd6069184f2 as builder
+# This base image is built using docker from cache every single time as build step.
+FROM gcr.io/k8s-skaffold/build_deps:latest as build
 WORKDIR /skaffold
-COPY . .
 
-FROM builder as release
+FROM build as builder
 ARG VERSION
-RUN make clean out/skaffold VERSION=$VERSION && mv out/skaffold /usr/bin/skaffold
+COPY . .
+RUN make clean out/skaffold VERSION=$VERSION && mv out/skaffold /usr/bin/skaffold && rm -rf secrets $SECRET
+
+FROM build as release
+COPY --from=builder /usr/bin/skaffold /usr/bin/skaffold
 RUN skaffold credits -d /THIRD_PARTY_NOTICES

@@ -21,38 +21,60 @@ import (
 	"context"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	packimg "github.com/buildpacks/pack/pkg/image"
+	"github.com/docker/docker/client"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestFetcher(t *testing.T) {
 	tests := []struct {
 		description    string
-		pull           bool
+		imageExists    bool
+		pull           packimg.PullPolicy
 		expectedPulled []string
 	}{
 		{
 			description:    "pull",
-			pull:           true,
+			pull:           packimg.PullAlways,
+			expectedPulled: []string{"image"},
+		},
+		{
+			description:    "pull-if-not-present but image present",
+			pull:           packimg.PullIfNotPresent,
+			imageExists:    true,
+			expectedPulled: nil,
+		},
+		{
+			description:    "pull-if-not-present",
+			pull:           packimg.PullIfNotPresent,
 			expectedPulled: []string{"image"},
 		},
 		{
 			description:    "don't pull",
-			pull:           false,
+			pull:           packimg.PullNever,
 			expectedPulled: nil,
 		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			api := &testutil.FakeAPIClient{}
-			docker := docker.NewLocalDaemon(api, nil, false, nil)
+			if test.imageExists {
+				api.Add("image", "sha256:deadbeef")
+			}
+			docker := fakeLocalDaemon(api)
 
 			var out bytes.Buffer
 
 			f := newFetcher(&out, docker)
-			f.Fetch(context.Background(), "image", true, test.pull)
+			f.Fetch(context.Background(), "image", packimg.FetchOptions{Daemon: true, PullPolicy: test.pull})
 
-			t.CheckDeepEqual(test.expectedPulled, api.Pulled)
+			t.CheckDeepEqual(test.expectedPulled, api.Pulled())
 		})
 	}
+}
+
+func fakeLocalDaemon(api client.CommonAPIClient) docker.LocalDaemon {
+	return docker.NewLocalDaemon(api, nil, false, nil)
 }

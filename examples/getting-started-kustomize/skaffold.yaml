@@ -1,4 +1,4 @@
-apiVersion: skaffold/v2beta5
+apiVersion: skaffold/v4beta12
 kind: Config
 metadata:
   name: getting-started-kustomize
@@ -6,18 +6,22 @@ build:
   artifacts:
   - image: skaffold-kustomize
     context: app
-deploy:
+    docker:
+      dockerfile: Dockerfile
+manifests:
   kustomize:
     paths:
     - overlays/dev
+deploy:
+  kubectl: {}
 profiles:
 - name: prod
-  deploy:
+  manifests:
     kustomize:
       paths:
       - overlays/prod
 - name: staging
-  deploy:
+  manifests:
     kustomize:
       paths:
       - overlays/staging

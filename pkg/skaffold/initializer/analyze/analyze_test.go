@@ -17,16 +17,16 @@ limitations under the License.
 package analyze
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	initconfig "github.com/GoogleContainerTools/skaffold/pkg/skaffold/initializer/config"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/jib"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/jib"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	initconfig "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/initializer/config"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 type builder struct {
@@ -414,7 +414,7 @@ func fakeValidateDockerfile(path string) bool {
 	return strings.Contains(strings.ToLower(path), "dockerfile")
 }
 
-func fakeValidateJibConfig(path string, enableGradle bool) []jib.ArtifactConfig {
+func fakeValidateJibConfig(_ context.Context, path string, enableGradle bool) []jib.ArtifactConfig {
 	if strings.HasSuffix(path, "build.gradle") && enableGradle {
 		return []jib.ArtifactConfig{{BuilderName: jib.PluginName(jib.JibGradle), File: path}}
 	}

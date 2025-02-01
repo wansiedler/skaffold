@@ -26,27 +26,39 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 // Build builds an artifact with Bazel.
-func (b *Builder) Build(ctx context.Context, out io.Writer, artifact *latest.Artifact, tag string) (string, error) {
+func (b *Builder) Build(ctx context.Context, out io.Writer, artifact *latest.Artifact, tag string, matcher platform.Matcher) (string, error) {
+	// TODO: Implement building multi-platform images
+	if matcher.IsMultiPlatform() {
+		log.Entry(ctx).Warnf("multiple target platforms %q found for artifact %q. Skaffold doesn't yet support multi-platform builds for the bazel builder. Consider specifying a single target platform explicitly. See https://skaffold.dev/docs/pipeline-stages/builders/#cross-platform-build-support", matcher.String(), artifact.ImageName)
+	}
+
 	a := artifact.ArtifactType.BazelArtifact
 
-	tarPath, err := b.buildTar(ctx, out, artifact.Workspace, a)
+	tarPath, err := b.buildTar(ctx, out, artifact.Workspace, a, matcher)
 	if err != nil {
 		return "", err
 	}
 
 	if b.pushImages {
-		return docker.Push(tarPath, tag, b.insecureRegistries)
+		return docker.Push(tarPath, tag, b.cfg, nil)
 	}
-	return b.loadImage(ctx, out, tarPath, a, tag)
+	return b.loadImage(ctx, out, tarPath, tag)
 }
 
-func (b *Builder) buildTar(ctx context.Context, out io.Writer, workspace string, a *latest.BazelArtifact) (string, error) {
+func (b *Builder) SupportedPlatforms() platform.Matcher { return platform.All }
+
+func (b *Builder) buildTar(ctx context.Context, out io.Writer, workspace string, a *latest.BazelArtifact, matcher platform.Matcher) (string, error) {
 	if !strings.HasSuffix(a.BuildTarget, ".tar") {
 		return "", errors.New("the bazel build target should end with .tar, see https://github.com/bazelbuild/rules_docker#using-with-docker-locally")
 	}
@@ -55,32 +67,55 @@ func (b *Builder) buildTar(ctx context.Context, out io.Writer, workspace string,
 	args = append(args, a.BuildArgs...)
 	args = append(args, a.BuildTarget)
 
+	platformMappings := a.PlatformMappings
+	for _, mapping := range platformMappings {
+		m, err := platform.Parse([]string{mapping.Platform})
+		if err == nil {
+			if matcher.Intersect(m).IsNotEmpty() {
+				args = append(args, fmt.Sprintf("--platforms=%s", mapping.BazelPlatformTarget))
+			}
+		}
+	}
+
+	if output.IsColorable(out) {
+		args = append(args, "--color=yes")
+	} else {
+		args = append(args, "--color=no")
+	}
+
 	// FIXME: is it possible to apply b.skipTests?
 	cmd := exec.CommandContext(ctx, "bazel", args...)
 	cmd.Dir = workspace
 	cmd.Stdout = out
 	cmd.Stderr = out
-	if err := util.RunCmd(cmd); err != nil {
+	if err := util.RunCmd(ctx, cmd); err != nil {
 		return "", fmt.Errorf("running command: %w", err)
 	}
 
-	bazelBin, err := bazelBin(ctx, workspace, a)
+	tarPath, err := bazelTarPath(ctx, workspace, a)
 	if err != nil {
-		return "", fmt.Errorf("getting path of bazel-bin: %w", err)
+		return "", fmt.Errorf("getting bazel tar path: %w", err)
 	}
 
-	tarPath := filepath.Join(bazelBin, buildTarPath(a.BuildTarget))
 	return tarPath, nil
 }
 
-func (b *Builder) loadImage(ctx context.Context, out io.Writer, tarPath string, a *latest.BazelArtifact, tag string) (string, error) {
+func (b *Builder) loadImage(ctx context.Context, out io.Writer, tarPath string, tag string) (string, error) {
+	manifest, err := tarball.LoadManifest(func() (io.ReadCloser, error) {
+		return os.Open(tarPath)
+	})
+
+	if err != nil {
+		return "", fmt.Errorf("loading manifest from tarball failed: %w", err)
+	}
+
 	imageTar, err := os.Open(tarPath)
 	if err != nil {
 		return "", fmt.Errorf("opening image tarball: %w", err)
 	}
 	defer imageTar.Close()
 
-	bazelTag := buildImageTag(a.BuildTarget)
+	bazelTag := manifest[0].RepoTags[0]
 	imageID, err := b.localDocker.Load(ctx, out, imageTar, bazelTag)
 	if err != nil {
 		return "", fmt.Errorf("loading image into docker daemon: %w", err)
@@ -93,47 +128,38 @@ func (b *Builder) loadImage(ctx context.Context, out io.Writer, tarPath string, 
 	return imageID, nil
 }
 
-func bazelBin(ctx context.Context, workspace string, a *latest.BazelArtifact) (string, error) {
-	args := []string{"info", "bazel-bin"}
+func bazelTarPath(ctx context.Context, workspace string, a *latest.BazelArtifact) (string, error) {
+	args := []string{
+		"cquery",
+		a.BuildTarget,
+		"--output",
+		"starlark",
+		// Bazel docker .tar output targets have a single output file, which is
+		// the path to the image tar.
+		"--starlark:expr",
+		"target.files.to_list()[0].path",
+	}
 	args = append(args, a.BuildArgs...)
 
 	cmd := exec.CommandContext(ctx, "bazel", args...)
 	cmd.Dir = workspace
 
-	buf, err := util.RunCmdOut(cmd)
+	buf, err := util.RunCmdOut(ctx, cmd)
 	if err != nil {
 		return "", err
 	}
 
-	return strings.TrimSpace(string(buf)), nil
-}
+	targetPath := strings.TrimSpace(string(buf))
 
-func trimTarget(buildTarget string) string {
-	// TODO(r2d4): strip off leading //:, bad
-	trimmedTarget := strings.TrimPrefix(buildTarget, "//")
-	// Useful if root target "//:target"
-	trimmedTarget = strings.TrimPrefix(trimmedTarget, ":")
+	cmd = exec.CommandContext(ctx, "bazel", "info", "execution_root")
+	cmd.Dir = workspace
 
-	return trimmedTarget
-}
-
-func buildTarPath(buildTarget string) string {
-	tarPath := trimTarget(buildTarget)
-	tarPath = strings.Replace(tarPath, ":", string(os.PathSeparator), 1)
-
-	return tarPath
-}
-
-func buildImageTag(buildTarget string) string {
-	imageTag := trimTarget(buildTarget)
-	imageTag = strings.TrimPrefix(imageTag, ":")
-
-	// TODO(r2d4): strip off trailing .tar, even worse
-	imageTag = strings.TrimSuffix(imageTag, ".tar")
-
-	if strings.Contains(imageTag, ":") {
-		return fmt.Sprintf("bazel/%s", imageTag)
+	buf, err = util.RunCmdOut(ctx, cmd)
+	if err != nil {
+		return "", err
 	}
 
-	return fmt.Sprintf("bazel:%s", imageTag)
+	execRoot := strings.TrimSpace(string(buf))
+
+	return filepath.Join(execRoot, targetPath), nil
 }

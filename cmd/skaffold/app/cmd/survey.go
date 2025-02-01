@@ -22,16 +22,21 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/survey"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/survey"
 )
+
+var surveyID string
 
 func NewCmdSurvey() *cobra.Command {
 	return NewCmd("survey").
-		WithDescription("Show Skaffold survey url").
+		WithDescription("Opens a web browser to fill out the Skaffold survey").
+		WithFlags([]*Flag{
+			{Value: &surveyID, Name: "id", DefValue: survey.HatsID, Usage: "Survey ID for survey command to open."},
+		}).
 		NoArgs(showSurvey)
 }
 
-func showSurvey(context context.Context, out io.Writer) error {
-	s := survey.New(opts.GlobalConfig)
-	return s.OpenSurveyForm(context, out)
+func showSurvey(ctx context.Context, out io.Writer) error {
+	s := survey.New(opts.GlobalConfig, opts.ConfigurationFile, opts.Command)
+	return s.OpenSurveyForm(ctx, out, surveyID)
 }

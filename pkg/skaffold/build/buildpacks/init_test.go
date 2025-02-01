@@ -20,8 +20,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestValidate(t *testing.T) {
@@ -68,7 +68,7 @@ func TestValidate(t *testing.T) {
 			description: "Python (root)",
 			path:        "requirements.txt",
 			otherFiles: []string{
-				filepath.Join("Procfile"),
+				"Procfile",
 			},
 			expectedValid: true,
 		},
@@ -85,6 +85,11 @@ func TestValidate(t *testing.T) {
 		{
 			description:   "Java Gradle Kotlin",
 			path:          filepath.Join("path", "to", "build.gradle.kts"),
+			expectedValid: true,
+		},
+		{
+			description:   ".NET project",
+			path:          "test.csproj",
 			expectedValid: true,
 		},
 		{
@@ -149,7 +154,7 @@ func TestArtifactType(t *testing.T) {
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			at := test.config.ArtifactType()
+			at := test.config.ArtifactType("ignored") // buildpacks doesn't include file references in its artifacts
 
 			t.CheckDeepEqual(test.expectedType, at)
 		})

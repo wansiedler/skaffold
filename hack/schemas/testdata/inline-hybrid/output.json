@@ -5,12 +5,13 @@
       "$ref": "#/definitions/TestStruct"
     }
   ],
-  "$schema": "http://json-schema-org/draft-07/schema#",
+  "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
     "TestStruct": {
       "required": [
         "reqField"
       ],
+      "type": "object",
       "anyOf": [
         {
           "properties": {

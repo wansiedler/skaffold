@@ -19,7 +19,7 @@ package gcp
 import (
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestExtractProjectID(t *testing.T) {
@@ -37,6 +37,11 @@ func TestExtractProjectID(t *testing.T) {
 		{
 			description: "eu.gcr.io",
 			imageName:   "gcr.io/project/image",
+			expected:    "project",
+		},
+		{
+			description: "us-east1-docker.pkg.dev",
+			imageName:   "us-east1-docker.pkg.dev/project/yyy/go-hello-world:latest",
 			expected:    "project",
 		},
 		{

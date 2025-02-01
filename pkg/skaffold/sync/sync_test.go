@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package sync
 
 import (
@@ -30,14 +31,14 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/jib"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/filemon"
-	pkgkubernetes "github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/jib"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/filemon"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/client"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestNewSyncItem(t *testing.T) {
@@ -48,7 +49,7 @@ func TestNewSyncItem(t *testing.T) {
 		dependencies map[string][]string
 		labels       map[string]string
 		evt          filemon.Events
-		builds       []build.Artifact
+		builds       []graph.Artifact
 		shouldErr    bool
 		expected     *Item
 		workingDir   string
@@ -63,7 +64,7 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				Workspace: ".",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -89,7 +90,7 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				Workspace: ".",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -113,7 +114,7 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				Workspace: "node",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -146,7 +147,7 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				Workspace: "node",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -175,7 +176,7 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				Workspace: "node",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -211,7 +212,7 @@ func TestNewSyncItem(t *testing.T) {
 				Added:   []string{"main.go"},
 				Deleted: []string{"index.html"},
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					Tag: "placeholder",
 				},
@@ -231,7 +232,7 @@ func TestNewSyncItem(t *testing.T) {
 				Added:   []string{"index.html"},
 				Deleted: []string{"some/other/file"},
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					Tag: "placeholder",
 				},
@@ -263,7 +264,7 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				Workspace: ".",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -282,7 +283,7 @@ func TestNewSyncItem(t *testing.T) {
 				Workspace: ".",
 			},
 			workingDir: "/some",
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -311,7 +312,7 @@ func TestNewSyncItem(t *testing.T) {
 				Workspace: ".",
 			},
 			workingDir: "/some/dir",
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -341,7 +342,7 @@ func TestNewSyncItem(t *testing.T) {
 				Workspace: ".",
 			},
 			workingDir: "/some",
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -371,7 +372,7 @@ func TestNewSyncItem(t *testing.T) {
 				Workspace: ".",
 			},
 			workingDir: "/some/dir",
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -403,7 +404,7 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				Workspace: ".",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -429,7 +430,7 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				Workspace: ".",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -449,7 +450,7 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				Workspace: ".",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -469,7 +470,7 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				Workspace: ".",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -490,7 +491,7 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				Workspace: "node",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -518,7 +519,7 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				Workspace: "node",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -545,7 +546,7 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				Workspace: "node",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -577,7 +578,7 @@ func TestNewSyncItem(t *testing.T) {
 				Deleted: []string{"server.html"},
 			},
 			dependencies: map[string][]string{"index.html": {"/index.html"}, "server.html": {"/server.html"}},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					Tag: "placeholder",
 				},
@@ -605,7 +606,7 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				Workspace: ".",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -623,7 +624,7 @@ func TestNewSyncItem(t *testing.T) {
 				Workspace: ".",
 			},
 			workingDir: "/some",
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -650,11 +651,11 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				ImageName: "test",
 				Sync: &latest.Sync{
-					Auto: &latest.Auto{},
+					Auto: util.Ptr(true),
 				},
 				Workspace: ".",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -690,11 +691,11 @@ func TestNewSyncItem(t *testing.T) {
 				},
 				ImageName: "test",
 				Sync: &latest.Sync{
-					Auto: &latest.Auto{},
+					Auto: util.Ptr(true),
 				},
 				Workspace: ".",
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -724,7 +725,7 @@ func TestNewSyncItem(t *testing.T) {
 				ImageName: "test",
 				Workspace: ".",
 				Sync: &latest.Sync{
-					Auto: &latest.Auto{},
+					Auto: util.Ptr(true),
 				},
 				ArtifactType: latest.ArtifactType{
 					JibArtifact: &latest.JibArtifact{},
@@ -733,7 +734,7 @@ func TestNewSyncItem(t *testing.T) {
 			evt: filemon.Events{
 				Added: []string{"this actually doesn't matter"},
 			},
-			builds: []build.Artifact{
+			builds: []graph.Artifact{
 				{
 					ImageName: "test",
 					Tag:       "test:123",
@@ -747,18 +748,58 @@ func TestNewSyncItem(t *testing.T) {
 				Delete: nil,
 			},
 		},
+
+		// Infer with Ko
+		{
+			description: "infer: ko static assets",
+			artifact: &latest.Artifact{
+				ArtifactType: latest.ArtifactType{
+					KoArtifact: &latest.KoArtifact{},
+				},
+				ImageName: "test",
+				Sync: &latest.Sync{
+					Infer: []string{"kodata/**/*"},
+				},
+			},
+			builds: []graph.Artifact{{
+				ImageName: "test",
+				Tag:       "test:123",
+			}},
+			evt: filemon.Events{
+				Added: []string{filepath.Join("kodata", "foo", "bar.html")},
+				Modified: []string{
+					filepath.Join("kodata", "frob", "baz.js"),
+					"main.go",
+				},
+				Deleted: []string{filepath.Join("kodata", "corge", "grault.css")},
+			},
+			expected: &Item{
+				Image: "test:123",
+				Copy: map[string][]string{
+					filepath.Join("kodata", "foo", "bar.html"): {"/var/run/ko/foo/bar.html"},
+					filepath.Join("kodata", "frob", "baz.js"):  {"/var/run/ko/frob/baz.js"},
+				},
+				Delete: map[string][]string{
+					filepath.Join("kodata", "corge", "grault.css"): {"/var/run/ko/corge/grault.css"},
+				},
+			},
+		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			t.Override(&WorkingDir, func(string, map[string]bool) (string, error) { return test.workingDir, nil })
-			t.Override(&SyncMap, func(*latest.Artifact, map[string]bool) (map[string][]string, error) { return test.dependencies, nil })
-			t.Override(&Labels, func(string, map[string]bool) (map[string]string, error) { return test.labels, nil })
+			t.Override(&WorkingDir, func(context.Context, string, docker.Config) (string, error) { return test.workingDir, nil })
+			t.Override(&SyncMap, func(context.Context, *latest.Artifact, docker.Config) (map[string][]string, error) {
+				return test.dependencies, nil
+			})
+			t.Override(&Labels, func(context.Context, string, docker.Config) (map[string]string, error) { return test.labels, nil })
 			t.Override(&jib.GetSyncDiff, func(context.Context, string, *latest.JibArtifact, filemon.Events) (map[string][]string, map[string][]string, error) {
 				return map[string][]string{"file.class": {"/some/file.class"}}, nil, nil
 			})
 
-			actual, err := NewItem(ctx, test.artifact, test.evt, test.builds, nil)
-
+			actual, err := NewItem(ctx, test.artifact, test.evt, test.builds, &mockConfig{}, 0)
+			if test.expected != nil {
+				test.expected.Artifact = test.artifact
+			}
 			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expected, actual)
 		})
 	}
@@ -822,7 +863,7 @@ func TestIntersect(t *testing.T) {
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			actual, err := intersect(test.context, test.workingDir, test.syncRules, test.files)
+			actual, err := intersect(context.TODO(), test.context, test.workingDir, test.syncRules, test.files)
 
 			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expected, actual)
 		})
@@ -834,7 +875,7 @@ type TestCmdRecorder struct {
 	err  error
 }
 
-func (t *TestCmdRecorder) RunCmd(cmd *exec.Cmd) error {
+func (t *TestCmdRecorder) RunCmd(ctx context.Context, cmd *exec.Cmd) error {
 	if t.err != nil {
 		return t.err
 	}
@@ -842,11 +883,15 @@ func (t *TestCmdRecorder) RunCmd(cmd *exec.Cmd) error {
 	return nil
 }
 
-func (t *TestCmdRecorder) RunCmdOut(cmd *exec.Cmd) ([]byte, error) {
-	return nil, t.RunCmd(cmd)
+func (t *TestCmdRecorder) RunCmdOut(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
+	return nil, t.RunCmd(ctx, cmd)
 }
 
-func fakeCmd(ctx context.Context, p v1.Pod, c v1.Container, files syncMap) *exec.Cmd {
+func (t *TestCmdRecorder) RunCmdOutOnce(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
+	return nil, t.RunCmd(ctx, cmd)
+}
+
+func fakeCmd(ctx context.Context, _ v1.Pod, _ v1.Container, files syncMap) *exec.Cmd {
 	var args []string
 
 	for src, dsts := range files {
@@ -858,35 +903,12 @@ func fakeCmd(ctx context.Context, p v1.Pod, c v1.Container, files syncMap) *exec
 	return exec.CommandContext(ctx, "copy", args...)
 }
 
-var pod = &v1.Pod{
+var runningPod = &v1.Pod{
 	ObjectMeta: metav1.ObjectMeta{
 		Name: "podname",
-		Labels: map[string]string{
-			"app.kubernetes.io/managed-by": "skaffold-dirty",
-		},
 	},
 	Status: v1.PodStatus{
 		Phase: v1.PodRunning,
-	},
-	Spec: v1.PodSpec{
-		Containers: []v1.Container{
-			{
-				Name:  "container_name",
-				Image: "gcr.io/k8s-skaffold:123",
-			},
-		},
-	},
-}
-
-var nonRunningPod = &v1.Pod{
-	ObjectMeta: metav1.ObjectMeta{
-		Name: "podname",
-		Labels: map[string]string{
-			"app.kubernetes.io/managed-by": "skaffold-dirty",
-		},
-	},
-	Status: v1.PodStatus{
-		Phase: v1.PodPending,
 	},
 	Spec: v1.PodSpec{
 		Containers: []v1.Container{
@@ -914,7 +936,7 @@ func TestPerform(t *testing.T) {
 			description: "no error",
 			image:       "gcr.io/k8s-skaffold:123",
 			files:       syncMap{"test.go": {"/test.go"}},
-			pod:         pod,
+			pod:         runningPod,
 			cmdFn:       fakeCmd,
 			expected:    []string{"copy test.go /test.go"},
 		},
@@ -922,7 +944,7 @@ func TestPerform(t *testing.T) {
 			description: "cmd error",
 			image:       "gcr.io/k8s-skaffold:123",
 			files:       syncMap{"test.go": {"/test.go"}},
-			pod:         pod,
+			pod:         runningPod,
 			cmdFn:       fakeCmd,
 			cmdErr:      fmt.Errorf(""),
 			shouldErr:   true,
@@ -931,24 +953,24 @@ func TestPerform(t *testing.T) {
 			description: "client error",
 			image:       "gcr.io/k8s-skaffold:123",
 			files:       syncMap{"test.go": {"/test.go"}},
-			pod:         pod,
+			pod:         runningPod,
 			cmdFn:       fakeCmd,
 			clientErr:   fmt.Errorf(""),
+			shouldErr:   true,
+		},
+		{
+			description: "pod not running",
+			image:       "gcr.io/k8s-skaffold:123",
+			files:       syncMap{"test.go": {"/test.go"}},
+			pod:         nil,
+			cmdFn:       fakeCmd,
 			shouldErr:   true,
 		},
 		{
 			description: "no copy",
 			image:       "gcr.io/different-pod:123",
 			files:       syncMap{"test.go": {"/test.go"}},
-			pod:         pod,
-			cmdFn:       fakeCmd,
-			shouldErr:   true,
-		},
-		{
-			description: "Skip sync when pod is not running",
-			image:       "gcr.io/k8s-skaffold:123",
-			files:       syncMap{"test.go": {"/test.go"}},
-			pod:         nonRunningPod,
+			pod:         runningPod,
 			cmdFn:       fakeCmd,
 			shouldErr:   true,
 		},
@@ -958,11 +980,15 @@ func TestPerform(t *testing.T) {
 			cmdRecord := &TestCmdRecorder{err: test.cmdErr}
 
 			t.Override(&util.DefaultExecCommand, cmdRecord)
-			t.Override(&pkgkubernetes.Client, func() (kubernetes.Interface, error) {
+			t.Override(&client.Client, func(string) (kubernetes.Interface, error) {
+				if test.pod == nil {
+					return fake.NewSimpleClientset(), nil
+				}
+
 				return fake.NewSimpleClientset(test.pod), test.clientErr
 			})
 
-			err := Perform(context.Background(), test.image, test.files, test.cmdFn, []string{""})
+			err := Perform(context.Background(), test.image, test.files, test.cmdFn, []string{""}, "")
 
 			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expected, cmdRecord.cmds)
 		})
@@ -1039,7 +1065,7 @@ func TestSyncMap(t *testing.T) {
 			t.Override(&docker.RetrieveImage, imageFetcher.fetch)
 			t.NewTempDir().WriteFiles(test.files).Chdir()
 
-			syncMap, err := SyncMap(&latest.Artifact{ArtifactType: test.artifactType}, nil)
+			syncMap, err := SyncMap(context.Background(), &latest.Artifact{ArtifactType: test.artifactType}, nil)
 
 			t.CheckError(test.shouldErr, err)
 			t.CheckDeepEqual(test.expectedMap, syncMap)
@@ -1049,7 +1075,7 @@ func TestSyncMap(t *testing.T) {
 
 type fakeImageFetcher struct{}
 
-func (f *fakeImageFetcher) fetch(image string, _ map[string]bool) (*registryv1.ConfigFile, error) {
+func (f *fakeImageFetcher) fetch(context.Context, string, docker.Config) (*registryv1.ConfigFile, error) {
 	return &registryv1.ConfigFile{}, nil
 }
 
@@ -1073,18 +1099,18 @@ func TestInit(t *testing.T) {
 		},
 		{
 			description: "sync on, auto on, non-jib",
-			artifact:    &latest.Artifact{Sync: &latest.Sync{Auto: &latest.Auto{}}},
+			artifact:    &latest.Artifact{Sync: &latest.Sync{Auto: util.Ptr(true)}},
 			shouldInit:  false,
 		},
 		{
 			description: "sync on, auto on, jib",
-			artifact:    &latest.Artifact{ArtifactType: latest.ArtifactType{JibArtifact: &latest.JibArtifact{}}, Sync: &latest.Sync{Auto: &latest.Auto{}}},
+			artifact:    &latest.Artifact{ArtifactType: latest.ArtifactType{JibArtifact: &latest.JibArtifact{}}, Sync: &latest.Sync{Auto: util.Ptr(true)}},
 			shouldInit:  true,
 			initErrors:  false,
 		},
 		{
 			description: "sync on, auto on, jib, init fails",
-			artifact:    &latest.Artifact{ArtifactType: latest.ArtifactType{JibArtifact: &latest.JibArtifact{}}, Sync: &latest.Sync{Auto: &latest.Auto{}}},
+			artifact:    &latest.Artifact{ArtifactType: latest.ArtifactType{JibArtifact: &latest.JibArtifact{}}, Sync: &latest.Sync{Auto: util.Ptr(true)}},
 			shouldInit:  true,
 			initErrors:  true,
 		},
@@ -1107,3 +1133,9 @@ func TestInit(t *testing.T) {
 		})
 	}
 }
+
+type mockConfig struct {
+	docker.Config
+}
+
+func (c *mockConfig) GetInsecureRegistries() map[string]bool { return nil }

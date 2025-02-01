@@ -18,7 +18,6 @@ package bazel
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,10 +26,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sirupsen/logrus"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 const sourceQuery = "kind('source file', deps('%[1]s')) union buildfiles(deps('%[1]s'))"
@@ -41,6 +39,8 @@ func query(target string) string {
 
 var once sync.Once
 
+var workspaceFileCandidates = []string{"WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel"}
+
 // GetDependencies finds the sources dependencies for the given bazel artifact.
 // All paths are relative to the workspace.
 func GetDependencies(ctx context.Context, dir string, a *latest.BazelArtifact) ([]string, error) {
@@ -49,22 +49,26 @@ func GetDependencies(ctx context.Context, dir string, a *latest.BazelArtifact) (
 
 	go func() {
 		<-timer.C
-		once.Do(func() { logrus.Warnln("Retrieving Bazel dependencies can take a long time the first time") })
+		once.Do(func() { log.Entry(ctx).Warn("Retrieving Bazel dependencies can take a long time the first time") })
 	}()
-
-	topLevelFolder, err := findWorkspace(dir)
-	if err != nil {
-		return nil, fmt.Errorf("unable to find the WORKSPACE file: %w", err)
-	}
 
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, fmt.Errorf("unable to find absolute path for %q: %w", dir, err)
 	}
+	absDir, err = filepath.EvalSymlinks(absDir)
+	if err != nil {
+		return nil, fmt.Errorf("unable to resolve symlinks in %q: %w", absDir, err)
+	}
+
+	workspaceDir, workspaceFiles, err := findWorkspace(ctx, absDir)
+	if err != nil {
+		return nil, fmt.Errorf("unable to find the WORKSPACE file: %w", err)
+	}
 
 	cmd := exec.CommandContext(ctx, "bazel", "query", query(a.BuildTarget), "--noimplicit_deps", "--order_output=no", "--output=label")
 	cmd.Dir = dir
-	stdout, err := util.RunCmdOut(cmd)
+	stdout, err := util.RunCmdOut(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("getting bazel dependencies: %w", err)
 	}
@@ -82,20 +86,23 @@ func GetDependencies(ctx context.Context, dir string, a *latest.BazelArtifact) (
 			continue
 		}
 
-		rel, err := filepath.Rel(absDir, filepath.Join(topLevelFolder, depToPath(l)))
+		rel, err := filepath.Rel(absDir, filepath.Join(workspaceDir, depToPath(l)))
+
 		if err != nil {
 			return nil, fmt.Errorf("unable to find absolute path: %w", err)
 		}
 		deps = append(deps, rel)
 	}
 
-	rel, err := filepath.Rel(absDir, filepath.Join(topLevelFolder, "WORKSPACE"))
-	if err != nil {
-		return nil, fmt.Errorf("unable to find absolute path: %w", err)
+	for _, workspaceFile := range workspaceFiles {
+		rel, err := filepath.Rel(absDir, filepath.Join(workspaceDir, workspaceFile))
+		if err != nil {
+			return nil, fmt.Errorf("unable to find absolute path: %w", err)
+		}
+		deps = append(deps, rel)
 	}
-	deps = append(deps, rel)
 
-	logrus.Debugf("Found dependencies for bazel artifact: %v", deps)
+	log.Entry(ctx).Debugf("Found dependencies for bazel artifact: %v", deps)
 
 	return deps, nil
 }
@@ -104,21 +111,27 @@ func depToPath(dep string) string {
 	return strings.TrimPrefix(strings.Replace(strings.TrimPrefix(dep, "//"), ":", "/", 1), "/")
 }
 
-func findWorkspace(workingDir string) (string, error) {
-	dir, err := filepath.Abs(workingDir)
+func findWorkspace(ctx context.Context, workingDir string) (string, []string, error) {
+	cmd := exec.CommandContext(ctx, "bazel", "info", "workspace")
+	cmd.Dir = workingDir
+	dirBytes, err := util.RunCmdOut(ctx, cmd)
 	if err != nil {
-		return "", fmt.Errorf("invalid working dir: %w", err)
+		return "", nil, fmt.Errorf("getting bazel workspace: %w", err)
+	}
+	dir := strings.TrimSpace(string(dirBytes))
+
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", nil, fmt.Errorf("unable to resolve symlinks in %q: %w", dir, err)
 	}
 
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "WORKSPACE")); err == nil {
-			return dir, nil
-		}
+	var workspaceFiles []string
 
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", errors.New("no WORKSPACE file found")
+	for _, workspaceFile := range workspaceFileCandidates {
+		if _, err := os.Stat(filepath.Join(resolvedDir, workspaceFile)); err == nil {
+			workspaceFiles = append(workspaceFiles, workspaceFile)
 		}
-		dir = parent
 	}
+
+	return resolvedDir, workspaceFiles, nil
 }

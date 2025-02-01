@@ -1,36 +1,33 @@
 run:
-  timeout: 6m
-  modules-download-mode: vendor
+  timeout: 10m
 
 linters:
   disable-all: true
   enable:
     - bodyclose
-    - deadcode
     - dogsled
-    - goconst
+    - gci
     - gocritic
     - goimports
-    - golint
     - goprintffuncname
     - gosimple
     - govet
     - ineffassign
-    - interfacer
-    - maligned
     - misspell
-    - nakedret
     - rowserrcheck
     - staticcheck
-    - structcheck
     - stylecheck
     - typecheck
     - unconvert
     - unparam
     - unused
-    - varcheck
     - whitespace
 
 linters-settings:
   goimports:
     local-prefixes: github.com/GoogleContainerTools/skaffold
+  gci:
+    sections:
+      - standard
+      - default
+      - prefix(github.com/GoogleContainerTools/skaffold)

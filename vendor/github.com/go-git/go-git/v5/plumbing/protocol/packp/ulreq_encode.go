@@ -15,9 +15,9 @@ import (
 // All the payloads will end with a newline character.  Wants and
 // shallows are sorted alphabetically.  A depth of 0 means no depth
 // request is sent.
-func (u *UploadRequest) Encode(w io.Writer) error {
+func (req *UploadRequest) Encode(w io.Writer) error {
 	e := newUlReqEncoder(w)
-	return e.Encode(u)
+	return e.Encode(req)
 }
 
 type ulReqEncoder struct {
@@ -130,6 +130,17 @@ func (e *ulReqEncoder) encodeDepth() stateFn {
 	default:
 		e.err = fmt.Errorf("unsupported depth type")
 		return nil
+	}
+
+	return e.encodeFilter
+}
+
+func (e *ulReqEncoder) encodeFilter() stateFn {
+	if filter := e.data.Filter; filter != "" {
+		if err := e.pe.Encodef("filter %s\n", filter); err != nil {
+			e.err = fmt.Errorf("encoding filter %s: %s", filter, err)
+			return nil
+		}
 	}
 
 	return e.encodeFlush

@@ -18,18 +18,18 @@ package jib
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 
-	"github.com/sirupsen/logrus"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 // For testing
@@ -59,7 +59,7 @@ func (c ArtifactConfig) Describe() string {
 }
 
 // ArtifactType returns the type of the artifact to be built.
-func (c ArtifactConfig) ArtifactType() latest.ArtifactType {
+func (c ArtifactConfig) ArtifactType(_ string) latest.ArtifactType {
 	return latest.ArtifactType{
 		JibArtifact: &latest.JibArtifact{
 			Project: c.Project,
@@ -84,18 +84,23 @@ type jibJSON struct {
 }
 
 // validate checks if a file is a valid Jib configuration. Returns the list of Config objects corresponding to each Jib project built by the file, or nil if Jib is not configured.
-func validate(path string, enableGradleAnalysis bool) []ArtifactConfig {
+func validate(ctx context.Context, path string, enableGradleAnalysis bool) []ArtifactConfig {
+	if !JVMFound(ctx) {
+		log.Entry(context.TODO()).Debugf("Skipping Jib for init for %q: no functioning Java VM", path)
+		return nil
+	}
 	// Determine whether maven or gradle
 	var builderType PluginType
 	var executable, wrapper, taskName, searchString, consoleFlag string
 	switch {
-	case strings.HasSuffix(path, "pom.xml"):
+	case isPomFile(path):
 		builderType = JibMaven
 		executable = "mvn"
 		wrapper = "mvnw"
-		searchString = "<artifactId>jib-maven-plugin</artifactId>"
+		searchString = "jib-maven-plugin"
 		taskName = "jib:_skaffold-init"
 		consoleFlag = "--batch-mode"
+
 	case enableGradleAnalysis && (strings.HasSuffix(path, "build.gradle") || strings.HasSuffix(path, "build.gradle.kts")):
 		builderType = JibGradle
 		executable = "gradle"
@@ -108,7 +113,7 @@ func validate(path string, enableGradleAnalysis bool) []ArtifactConfig {
 	}
 
 	// Search for indication of Jib in build file before proceeding
-	if content, err := ioutil.ReadFile(path); err != nil || !strings.Contains(string(content), searchString) {
+	if content, err := os.ReadFile(path); err != nil || !strings.Contains(string(content), searchString) {
 		return nil
 	}
 
@@ -118,7 +123,7 @@ func validate(path string, enableGradleAnalysis bool) []ArtifactConfig {
 	}
 	cmd := exec.Command(executable, taskName, "-q", consoleFlag)
 	cmd.Dir = filepath.Dir(path)
-	stdout, err := util.RunCmdOut(cmd)
+	stdout, err := util.RunCmdOut(ctx, cmd)
 	if err != nil {
 		return nil
 	}
@@ -132,10 +137,10 @@ func validate(path string, enableGradleAnalysis bool) []ArtifactConfig {
 	var results []ArtifactConfig
 	for _, match := range matches {
 		// Escape windows path separators
-		line := bytes.Replace(match[1], []byte(`\`), []byte(`\\`), -1)
+		line := bytes.ReplaceAll(match[1], []byte(`\`), []byte(`\\`))
 		parsedJSON := jibJSON{}
 		if err := json.Unmarshal(line, &parsedJSON); err != nil {
-			logrus.Warnf("failed to parse jib json: %s", err.Error())
+			log.Entry(context.TODO()).Warnf("failed to parse jib json: %s", err.Error())
 			return nil
 		}
 
@@ -147,4 +152,10 @@ func validate(path string, enableGradleAnalysis bool) []ArtifactConfig {
 		})
 	}
 	return results
+}
+
+// checks that the file is a maven pom file, and returns the file extension
+func isPomFile(path string) bool {
+	filename := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	return filename == "pom"
 }

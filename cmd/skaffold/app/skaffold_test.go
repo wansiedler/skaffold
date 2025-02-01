@@ -18,37 +18,118 @@ package app
 
 import (
 	"bytes"
-	"io/ioutil"
+	"io"
 	"os"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestMainHelp(t *testing.T) {
 	testutil.Run(t, "", func(t *testutil.T) {
+		// --interactive=false removes the update check and survey prompt.
+		t.Override(&os.Args, []string{"skaffold", "help", "--interactive=false"})
+
 		var (
 			output    bytes.Buffer
 			errOutput bytes.Buffer
 		)
-
-		t.Override(&os.Args, []string{"skaffold", "help"})
-
 		err := Run(&output, &errOutput)
 
 		t.CheckNoError(err)
-		t.CheckContains("End-to-end pipelines", output.String())
-		t.CheckContains("Getting started with a new project", output.String())
+		t.CheckContains("End-to-end Pipelines", output.String())
+		t.CheckContains("Getting Started With a New Project", output.String())
 		t.CheckEmpty(errOutput.String())
 	})
 }
 
 func TestMainUnknownCommand(t *testing.T) {
 	testutil.Run(t, "", func(t *testutil.T) {
-		t.Override(&os.Args, []string{"skaffold", "unknown"})
+		// --interactive=false removes the update check and survey prompt.
+		t.Override(&os.Args, []string{"skaffold", "unknown", "--interactive=false"})
 
-		err := Run(ioutil.Discard, ioutil.Discard)
+		err := Run(io.Discard, io.Discard)
 
 		t.CheckError(true, err)
+	})
+}
+
+func TestSkaffoldCmdline_MainHelp(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		var (
+			output    bytes.Buffer
+			errOutput bytes.Buffer
+		)
+
+		t.Setenv("SKAFFOLD_CMDLINE", "help")
+		t.Override(&os.Args, []string{"skaffold"})
+
+		err := Run(&output, &errOutput)
+
+		t.CheckNoError(err)
+		t.CheckContains("End-to-end Pipelines", output.String())
+		t.CheckContains("Getting Started With a New Project", output.String())
+		t.CheckEmpty(errOutput.String())
+	})
+}
+
+func TestSkaffoldCmdline_MainUnknownCommand(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		t.Override(&os.Args, []string{"skaffold"})
+		t.Setenv("SKAFFOLD_CMDLINE", "unknown")
+
+		err := Run(io.Discard, io.Discard)
+
+		t.CheckError(true, err)
+	})
+}
+
+func TestMain_InvalidUsageExitCode(t *testing.T) {
+	testutil.Run(t, "unknown command", func(t *testutil.T) {
+		// --interactive=false removes the update check and survey prompt.
+		t.Override(&os.Args, []string{"skaffold", "unknown", "--interactive=false"})
+		err := Run(io.Discard, io.Discard)
+		t.CheckErrorAndExitCode(127, err)
+	})
+	testutil.Run(t, "unknown flag", func(t *testutil.T) {
+		// --interactive=false removes the update check and survey prompt.
+		t.Override(&os.Args, []string{"skaffold", "--help2", "--interactive=false"})
+		err := Run(io.Discard, io.Discard)
+		t.CheckErrorAndExitCode(127, err)
+	})
+	testutil.Run(t, "exactargs error", func(t *testutil.T) {
+		// --interactive=false removes the update check and survey prompt.
+		t.Override(&os.Args, []string{"skaffold", "config", "set", "a", "b", "c"})
+		err := Run(io.Discard, io.Discard)
+		t.CheckErrorAndExitCode(127, err)
+	})
+}
+
+func TestMain_SuppressedErrorReporing(t *testing.T) {
+	testutil.Run(t, "inspect should suppress error output", func(t *testutil.T) {
+		var (
+			output    bytes.Buffer
+			errOutput bytes.Buffer
+		)
+		// non-existent profile should report an error
+		t.Override(&os.Args, []string{"skaffold", "inspect", "build-env", "list", "--profile", "non-existent"})
+		err := Run(&output, &errOutput)
+		t.CheckError(true, err)
+		t.CheckContains(`{"errorCode":`, output.String())
+		t.CheckEmpty(errOutput.String())
+	})
+
+	testutil.Run(t, "diagnose should report error output", func(t *testutil.T) {
+		var (
+			output    bytes.Buffer
+			errOutput bytes.Buffer
+		)
+		// non-existent profile should report an error
+		t.Override(&os.Args, []string{"skaffold", "diagnose", "--yaml-only", "--profile", "non-existent"})
+		err := Run(&output, &errOutput)
+		t.CheckError(true, err)
+		t.CheckEmpty(output.String())
+		// checking quoted filename ensures there are no JSON errors too
+		t.CheckContains(`unable to find configuration file "skaffold.yaml"`, errOutput.String())
 	})
 }

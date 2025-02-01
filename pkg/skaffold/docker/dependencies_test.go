@@ -25,9 +25,15 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
+
+const copyEmptydirectory = `
+FROM ubuntu:14.04
+COPY emptydir .
+`
 
 const copyServerGo = `
 FROM ubuntu:14.04
@@ -63,6 +69,21 @@ FROM nginx
 ADD *.go *.none /tmp/
 `
 
+const simpleArtifactDependency = `
+ARG BASE
+FROM $BASE
+COPY worker.go .
+`
+
+const multiStageArtifactDependency = `
+ARG BASE
+FROM golang:1.9.2
+COPY worker.go .
+
+FROM $BASE AS foo
+FROM foo as bar
+`
+
 const multiStageDockerfile1 = `
 FROM golang:1.9.2
 WORKDIR /go/src/github.com/r2d4/leeroy/
@@ -80,6 +101,13 @@ COPY worker.go .
 
 FROM gcr.io/distroless/base
 ADD server.go .
+`
+
+const buildKitDockerfile = `
+# syntax = docker/dockerfile:1-experimental
+FROM golang:1.9.2
+COPY server.go .
+RUN --mount=type=cache,target=/go/pkg/mod go build .
 `
 
 const envTest = `
@@ -216,24 +244,15 @@ FROM stage
 ADD ./file /etc/file
 `
 
-type fakeImageFetcher struct{}
+const invalidFrom = `
+FROM
+COPY . /
+`
 
-func (f *fakeImageFetcher) fetch(image string, _ map[string]bool) (*v1.ConfigFile, error) {
-	switch image {
-	case "ubuntu:14.04", "busybox", "nginx", "golang:1.9.2", "jboss/wildfly:14.0.1.Final", "gcr.io/distroless/base":
-		return &v1.ConfigFile{}, nil
-	case "golang:onbuild":
-		return &v1.ConfigFile{
-			Config: v1.Config{
-				OnBuild: []string{
-					"COPY . /onbuild",
-				},
-			},
-		}, nil
-	}
-
-	return nil, fmt.Errorf("no image found for %s", image)
-}
+const fromV1Manifest = `
+FROM library/ruby:2.3.0
+ADD ./file /etc/file
+`
 
 func TestGetDependencies(t *testing.T) {
 	tests := []struct {
@@ -248,6 +267,18 @@ func TestGetDependencies(t *testing.T) {
 		expected  []string
 		shouldErr bool
 	}{
+		{
+			description: "copy empty directory",
+			dockerfile:  copyEmptydirectory,
+			workspace:   ".",
+			expected:    []string{"Dockerfile", "emptydir"},
+		},
+		{
+			description: "buildkit dockerfile",
+			dockerfile:  buildKitDockerfile,
+			workspace:   "",
+			expected:    []string{"Dockerfile", "server.go"},
+		},
 		{
 			description: "copy dependency",
 			dockerfile:  copyServerGo,
@@ -301,6 +332,18 @@ func TestGetDependencies(t *testing.T) {
 			expected:    []string{"Dockerfile", "server.go", "worker.go"},
 		},
 		{
+			description: "simple dockerfile with artifact dependency",
+			dockerfile:  simpleArtifactDependency,
+			workspace:   "",
+			expected:    []string{"Dockerfile", "worker.go"},
+		},
+		{
+			description: "multistage dockerfile with artifact dependency",
+			dockerfile:  multiStageArtifactDependency,
+			workspace:   "",
+			expected:    []string{"Dockerfile", "worker.go"},
+		},
+		{
 			description: "copy twice",
 			dockerfile:  multiCopy,
 			workspace:   ".",
@@ -327,7 +370,7 @@ func TestGetDependencies(t *testing.T) {
 		{
 			description: "dockerignore test",
 			dockerfile:  copyDirectory,
-			ignore:      "bar\ndocker/*",
+			ignore:      "emptydir\nbar\ndocker/*",
 			workspace:   ".",
 			expected:    []string{".dot", "Dockerfile", "file", "server.go", "test.conf", "worker.go"},
 		},
@@ -349,40 +392,40 @@ func TestGetDependencies(t *testing.T) {
 			description: "ignore none",
 			dockerfile:  copyAll,
 			workspace:   ".",
-			expected:    []string{".dot", "Dockerfile", "bar", filepath.Join("docker", "bar"), filepath.Join("docker", "nginx.conf"), "file", "server.go", "test.conf", "worker.go"},
+			expected:    []string{".dot", "Dockerfile", "bar", filepath.Join("docker", "bar"), filepath.Join("docker", "nginx.conf"), "emptydir", "file", "server.go", "test.conf", "worker.go"},
 		},
 		{
 			description: "ignore dotfiles",
 			dockerfile:  copyAll,
 			workspace:   ".",
 			ignore:      ".*",
-			expected:    []string{"Dockerfile", "bar", filepath.Join("docker", "bar"), filepath.Join("docker", "nginx.conf"), "file", "server.go", "test.conf", "worker.go"},
+			expected:    []string{"Dockerfile", "bar", filepath.Join("docker", "bar"), filepath.Join("docker", "nginx.conf"), "emptydir", "file", "server.go", "test.conf", "worker.go"},
 		},
 		{
 			description: "ignore dotfiles (root syntax)",
 			dockerfile:  copyAll,
 			workspace:   ".",
 			ignore:      "/.*",
-			expected:    []string{"Dockerfile", "bar", filepath.Join("docker", "bar"), filepath.Join("docker", "nginx.conf"), "file", "server.go", "test.conf", "worker.go"},
+			expected:    []string{"Dockerfile", "bar", filepath.Join("docker", "bar"), filepath.Join("docker", "nginx.conf"), "emptydir", "file", "server.go", "test.conf", "worker.go"},
 		},
 		{
 			description: "dockerignore with context in parent directory",
 			dockerfile:  copyDirectory,
 			workspace:   "docker/..",
-			ignore:      "bar\ndocker\n*.go",
+			ignore:      "emptydir\nbar\ndocker\n*.go",
 			expected:    []string{".dot", "Dockerfile", "file", "test.conf"},
 		},
 		{
 			description: "onbuild test",
 			dockerfile:  onbuild,
 			workspace:   ".",
-			expected:    []string{".dot", "Dockerfile", "bar", filepath.Join("docker", "bar"), filepath.Join("docker", "nginx.conf"), "file", "server.go", "test.conf", "worker.go"},
+			expected:    []string{".dot", "Dockerfile", "bar", filepath.Join("docker", "bar"), filepath.Join("docker", "nginx.conf"), "emptydir", "file", "server.go", "test.conf", "worker.go"},
 		},
 		{
 			description: "onbuild with dockerignore",
 			dockerfile:  onbuild,
 			workspace:   ".",
-			ignore:      "bar\ndocker/*",
+			ignore:      "emptydir\nbar\ndocker/*",
 			expected:    []string{".dot", "Dockerfile", "file", "server.go", "test.conf", "worker.go"},
 		},
 		{
@@ -395,28 +438,28 @@ func TestGetDependencies(t *testing.T) {
 			description: "build args",
 			dockerfile:  copyServerGoBuildArg,
 			workspace:   ".",
-			buildArgs:   map[string]*string{"FOO": util.StringPtr("server.go")},
+			buildArgs:   map[string]*string{"FOO": util.Ptr("server.go")},
 			expected:    []string{"Dockerfile", "server.go"},
 		},
 		{
 			description: "build args with same prefix",
 			dockerfile:  copyWorkerGoBuildArgSamePrefix,
 			workspace:   ".",
-			buildArgs:   map[string]*string{"FOO2": util.StringPtr("worker.go")},
+			buildArgs:   map[string]*string{"FOO2": util.Ptr("worker.go")},
 			expected:    []string{"Dockerfile", "worker.go"},
 		},
 		{
 			description: "build args with curly braces",
 			dockerfile:  copyServerGoBuildArgCurlyBraces,
 			workspace:   ".",
-			buildArgs:   map[string]*string{"FOO": util.StringPtr("server.go")},
+			buildArgs:   map[string]*string{"FOO": util.Ptr("server.go")},
 			expected:    []string{"Dockerfile", "server.go"},
 		},
 		{
 			description: "build args with extra whitespace",
 			dockerfile:  copyServerGoBuildArgExtraWhitespace,
 			workspace:   ".",
-			buildArgs:   map[string]*string{"FOO": util.StringPtr("server.go")},
+			buildArgs:   map[string]*string{"FOO": util.Ptr("server.go")},
 			expected:    []string{"Dockerfile", "server.go"},
 		},
 		{
@@ -441,7 +484,7 @@ func TestGetDependencies(t *testing.T) {
 			description: "override default build arg",
 			dockerfile:  copyServerGoBuildArgDefaultValue,
 			workspace:   ".",
-			buildArgs:   map[string]*string{"FOO": util.StringPtr("worker.go")},
+			buildArgs:   map[string]*string{"FOO": util.Ptr("worker.go")},
 			expected:    []string{"Dockerfile", "worker.go"},
 		},
 		{
@@ -491,7 +534,7 @@ func TestGetDependencies(t *testing.T) {
 			description: "build args with an environment variable",
 			dockerfile:  copyServerGoBuildArg,
 			workspace:   ".",
-			buildArgs:   map[string]*string{"FOO": util.StringPtr("{{.FILE_NAME}}")},
+			buildArgs:   map[string]*string{"FOO": util.Ptr("{{.FILE_NAME}}")},
 			env:         []string{"FILE_NAME=server.go"},
 			expected:    []string{"Dockerfile", "server.go"},
 		},
@@ -499,7 +542,7 @@ func TestGetDependencies(t *testing.T) {
 			description: "invalid go template as build arg",
 			dockerfile:  copyServerGoBuildArg,
 			workspace:   ".",
-			buildArgs:   map[string]*string{"FOO": util.StringPtr("{{")},
+			buildArgs:   map[string]*string{"FOO": util.Ptr("{{")},
 			shouldErr:   true,
 		},
 		{
@@ -526,9 +569,21 @@ func TestGetDependencies(t *testing.T) {
 			description:    "find specific dockerignore",
 			dockerfile:     copyDirectory,
 			workspace:      ".",
-			ignore:         "bar\ndocker/*",
+			ignore:         "emptydir\nbar\ndocker/*",
 			ignoreFilename: "Dockerfile.dockerignore",
 			expected:       []string{".dot", "Dockerfile", "Dockerfile.dockerignore", "file", "server.go", "test.conf", "worker.go"},
+		},
+		{
+			description: "invalid dockerfile",
+			dockerfile:  invalidFrom,
+			workspace:   ".",
+			shouldErr:   true,
+		},
+		{
+			description: "old manifest version - watch local file dependency.",
+			dockerfile:  fromV1Manifest,
+			workspace:   ".",
+			expected:    []string{"Dockerfile", "file"},
 		},
 	}
 
@@ -540,6 +595,7 @@ func TestGetDependencies(t *testing.T) {
 
 			tmpDir := t.NewTempDir().
 				Touch("docker/nginx.conf", "docker/bar", "server.go", "test.conf", "worker.go", "bar", "file", ".dot")
+			tmpDir.Mkdir("emptydir")
 			if test.dockerfile != "" {
 				tmpDir.Write(test.workspace+"/Dockerfile", test.dockerfile)
 			}
@@ -553,8 +609,10 @@ func TestGetDependencies(t *testing.T) {
 			}
 
 			workspace := tmpDir.Path(test.workspace)
-			deps, err := GetDependencies(context.Background(), workspace, "Dockerfile", test.buildArgs, nil)
-
+			m := mockConfig{
+				mode: config.RunModes.Dev,
+			}
+			deps, err := GetDependencies(context.Background(), NewBuildConfig(workspace, "test", "Dockerfile", test.buildArgs), m)
 			t.CheckError(test.shouldErr, err)
 			t.CheckDeepEqual(test.expected, deps)
 		})
@@ -627,5 +685,70 @@ func checkSameFile(t *testutil.T, expected, result string) {
 
 	if !os.SameFile(i1, i2) {
 		t.Errorf("returned wrong file\n   got: %s\nwanted: %s", result, expected)
+	}
+}
+
+func TestGetDependenciesCached(t *testing.T) {
+	imageFetcher := fakeImageFetcher{}
+	tests := []struct {
+		description        string
+		retrieveImgMock    func(context.Context, string, Config) (*v1.ConfigFile, error)
+		dependencyCache    map[string][]string
+		dependencyCacheErr map[string]error
+		expected           []string
+		shouldErr          bool
+	}{
+		{
+			description:     "with no cached results getDependencies will retrieve image",
+			retrieveImgMock: imageFetcher.fetch,
+			dependencyCache: map[string][]string{},
+			expected:        []string{"Dockerfile", "server.go"},
+		},
+		{
+			description: "with cached results getDependencies should read from cache",
+			retrieveImgMock: func(context.Context, string, Config) (*v1.ConfigFile, error) {
+				return nil, fmt.Errorf("unexpected call")
+			},
+			dependencyCache: map[string][]string{"dummy": {"random.go"}},
+			expected:        []string{"random.go"},
+		},
+		{
+			description: "with cached results is error getDependencies should read from cache",
+			retrieveImgMock: func(context.Context, string, Config) (*v1.ConfigFile, error) {
+				return &v1.ConfigFile{}, nil
+			},
+			dependencyCacheErr: map[string]error{"dummy": fmt.Errorf("remote manifest fetch")},
+			shouldErr:          true,
+		},
+		{
+			description:     "with cached results for dockerfile in another app",
+			retrieveImgMock: imageFetcher.fetch,
+			dependencyCache: map[string][]string{"another": {"random.go"}},
+			expected:        []string{"Dockerfile", "server.go"},
+		},
+	}
+
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			t.Override(&RetrieveImage, test.retrieveImgMock)
+			t.Override(&util.OSEnviron, func() []string { return []string{} })
+			t.Override(&dependencyCache, util.NewSyncStore[[]string]())
+
+			tmpDir := t.NewTempDir().Touch("server.go", "random.go")
+			tmpDir.Write("Dockerfile", copyServerGo)
+
+			for k, v := range test.dependencyCache {
+				dependencyCache.Exec(k, func() ([]string, error) {
+					return v, nil
+				})
+			}
+			for k, v := range test.dependencyCacheErr {
+				dependencyCache.Exec(k, func() ([]string, error) {
+					return nil, v
+				})
+			}
+			deps, err := GetDependenciesCached(context.Background(), NewBuildConfig(tmpDir.Root(), "dummy", "Dockerfile", map[string]*string{}), nil)
+			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expected, deps)
+		})
 	}
 }

@@ -20,68 +20,116 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"google.golang.org/protobuf/testing/protocmp"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/constants"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner/runcontext"
+	"github.com/GoogleContainerTools/skaffold/v2/proto/v1"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
+)
+
+var (
+	dummyRunCtx = runcontext.RunContext{}
 )
 
 func TestShowAIError(t *testing.T) {
 	tests := []struct {
 		description string
 		opts        config.SkaffoldOptions
+		phase       constants.Phase
 		context     *config.ContextConfig
 		err         error
 		expected    string
+		expectedAE  *proto.ActionableErr
 	}{
+		// unknown errors case
 		{
-			description: "Push access denied when neither default repo or global config is defined",
-			opts:        config.SkaffoldOptions{},
-			context:     &config.ContextConfig{},
-			err:         fmt.Errorf("skaffold build failed: could not push image: denied: push access to resource"),
-			expected:    "Build Failed. No push access to specified image repository. Trying running with `--default-repo` flag.",
-		},
-		{
-			description: "Push access denied when default repo is defined",
-			opts:        config.SkaffoldOptions{DefaultRepo: stringOrUndefined("gcr.io/test")},
-			context:     &config.ContextConfig{},
-			err:         fmt.Errorf("skaffold build failed: could not push image image1 : denied: push access to resource"),
-			expected:    "Build Failed. No push access to specified image repository. Check your `--default-repo` value or try `gcloud auth configure-docker`.",
-		},
-		{
-			description: "Push access denied when global repo is defined",
-			opts:        config.SkaffoldOptions{},
+			description: "build unknown error",
 			context:     &config.ContextConfig{DefaultRepo: "docker.io/global"},
-			err:         fmt.Errorf("skaffold build failed: could not push image: denied: push access to resource"),
-			expected:    "Build Failed. No push access to specified image repository. Check your default-repo setting in skaffold config or try `docker login`.",
-		},
-		{
-			description: "unknown project error",
-			opts:        config.SkaffoldOptions{},
-			context:     &config.ContextConfig{DefaultRepo: "docker.io/global"},
-			err:         fmt.Errorf("build failed: could not push image: unknown: Project"),
-			expected:    "Build Failed. Check your GCR project.",
-		},
-		{
-			description: "unknown error",
-			opts:        config.SkaffoldOptions{},
-			context:     &config.ContextConfig{DefaultRepo: "docker.io/global"},
+			phase:       constants.Build,
 			err:         fmt.Errorf("build failed: something went wrong"),
-			expected:    "no suggestions found",
+			expected:    "build failed: something went wrong",
+			expectedAE: &proto.ActionableErr{
+				ErrCode:     proto.StatusCode_BUILD_UNKNOWN,
+				Message:     "build failed: something went wrong",
+				Suggestions: ReportIssueSuggestion(dummyRunCtx),
+			},
+		},
+		{
+			description: "deploy unknown error",
+			phase:       constants.Deploy,
+			err:         fmt.Errorf("deploy failed: something went wrong"),
+			expected:    "deploy failed: something went wrong",
+			expectedAE: &proto.ActionableErr{
+				ErrCode:     proto.StatusCode_DEPLOY_UNKNOWN,
+				Message:     "deploy failed: something went wrong",
+				Suggestions: ReportIssueSuggestion(dummyRunCtx),
+			},
+		},
+		{
+			description: "file sync unknown error",
+			phase:       constants.Sync,
+			err:         fmt.Errorf("sync failed: something went wrong"),
+			expected:    "sync failed: something went wrong",
+			expectedAE: &proto.ActionableErr{
+				ErrCode:     proto.StatusCode_SYNC_UNKNOWN,
+				Message:     "sync failed: something went wrong",
+				Suggestions: ReportIssueSuggestion(dummyRunCtx),
+			},
+		},
+		{
+			description: "init unknown error",
+			phase:       constants.Init,
+			err:         fmt.Errorf("init failed: something went wrong"),
+			expected:    "init failed: something went wrong",
+			expectedAE: &proto.ActionableErr{
+				ErrCode:     proto.StatusCode_INIT_UNKNOWN,
+				Message:     "init failed: something went wrong",
+				Suggestions: ReportIssueSuggestion(dummyRunCtx),
+			},
+		},
+		{
+			description: "cleanup unknown error",
+			phase:       constants.Cleanup,
+			err:         fmt.Errorf("failed: something went wrong"),
+			expected:    "failed: something went wrong",
+			expectedAE: &proto.ActionableErr{
+				ErrCode:     proto.StatusCode_CLEANUP_UNKNOWN,
+				Message:     "failed: something went wrong",
+				Suggestions: ReportIssueSuggestion(dummyRunCtx),
+			},
+		},
+		{
+			description: "status check unknown error",
+			phase:       constants.StatusCheck,
+			err:         fmt.Errorf("failed: something went wrong"),
+			expected:    "failed: something went wrong",
+			expectedAE: &proto.ActionableErr{
+				ErrCode:     proto.StatusCode_STATUSCHECK_UNKNOWN,
+				Message:     "failed: something went wrong",
+				Suggestions: ReportIssueSuggestion(dummyRunCtx),
+			},
+		},
+		{
+			description: "dev init unknown error",
+			phase:       constants.DevInit,
+			err:         fmt.Errorf("failed: something went wrong"),
+			expected:    "failed: something went wrong",
+			expectedAE: &proto.ActionableErr{
+				ErrCode:     proto.StatusCode_DEVINIT_UNKNOWN,
+				Message:     "failed: something went wrong",
+				Suggestions: ReportIssueSuggestion(dummyRunCtx),
+			},
 		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			t.Override(&getConfigForCurrentContext, func(string) (*config.ContextConfig, error) {
-				return test.context, nil
-			})
-			skaffoldOpts = test.opts
-			actual := ShowAIError(test.err)
+			runCtx := runcontext.RunContext{KubeContext: "test_cluster", Opts: test.opts}
+			actual := ShowAIError(runCtx, test.err)
 			t.CheckDeepEqual(test.expected, actual.Error())
+			actualAE := ActionableErr(runCtx, test.phase, test.err)
+			t.CheckDeepEqual(test.expectedAE, actualAE, protocmp.Transform())
 		})
 	}
-}
-
-func stringOrUndefined(s string) config.StringOrUndefined {
-	c := &config.StringOrUndefined{}
-	c.Set(s)
-	return *c
 }

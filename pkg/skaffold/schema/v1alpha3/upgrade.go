@@ -17,9 +17,9 @@ limitations under the License.
 package v1alpha3
 
 import (
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/util"
-	next "github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/v1alpha4"
-	pkgutil "github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
+	next "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/v1alpha4"
+	pkgutil "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 // Upgrade upgrades a configuration to the next version.
@@ -39,6 +39,7 @@ import (
 //    - Artifact.imageName -> image, workspace -> context in yaml
 //		- DockerArtifact.dockerfilePath -> dockerfile in yaml
 //    - BazelArtifact.BuildTarget is optional in yaml
+
 func (c *SkaffoldConfig) Upgrade() (util.VersionedConfig, error) {
 	// convert Deploy (should be the same)
 	var newDeploy next.DeployConfig

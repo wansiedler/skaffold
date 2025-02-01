@@ -18,12 +18,12 @@ package config
 
 import (
 	"context"
-	"io/ioutil"
+	"io"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestSetAndUnsetConfig(t *testing.T) {
@@ -36,6 +36,7 @@ func TestSetAndUnsetConfig(t *testing.T) {
 		key              string
 		value            string
 		kubecontext      string
+		surveyID         string
 		global           bool
 		survey           bool
 		shouldErr        bool
@@ -62,6 +63,27 @@ func TestSetAndUnsetConfig(t *testing.T) {
 			},
 		},
 		{
+			description: "set multi-level repo",
+			key:         "multi-level-repo",
+			value:       "false",
+			kubecontext: "this_is_a_context",
+			expectedSetCfg: &config.GlobalConfig{
+				ContextConfigs: []*config.ContextConfig{
+					{
+						Kubecontext:    "this_is_a_context",
+						MultiLevelRepo: util.Ptr(false),
+					},
+				},
+			},
+			expectedUnsetCfg: &config.GlobalConfig{
+				ContextConfigs: []*config.ContextConfig{
+					{
+						Kubecontext: "this_is_a_context",
+					},
+				},
+			},
+		},
+		{
 			description: "set local cluster",
 			key:         "local-cluster",
 			value:       "false",
@@ -70,7 +92,7 @@ func TestSetAndUnsetConfig(t *testing.T) {
 				ContextConfigs: []*config.ContextConfig{
 					{
 						Kubecontext:  "this_is_a_context",
-						LocalCluster: util.BoolPtr(false),
+						LocalCluster: util.Ptr(false),
 					},
 				},
 			},
@@ -112,13 +134,29 @@ func TestSetAndUnsetConfig(t *testing.T) {
 			},
 		},
 		{
+			description: "set global multi-level repo",
+			key:         "multi-level-repo",
+			value:       "true",
+			global:      true,
+			expectedSetCfg: &config.GlobalConfig{
+				Global: &config.ContextConfig{
+					MultiLevelRepo: util.Ptr(true),
+				},
+				ContextConfigs: []*config.ContextConfig{},
+			},
+			expectedUnsetCfg: &config.GlobalConfig{
+				Global:         &config.ContextConfig{},
+				ContextConfigs: []*config.ContextConfig{},
+			},
+		},
+		{
 			description: "set global local cluster",
 			key:         "local-cluster",
 			value:       "true",
 			global:      true,
 			expectedSetCfg: &config.GlobalConfig{
 				Global: &config.ContextConfig{
-					LocalCluster: util.BoolPtr(true),
+					LocalCluster: util.Ptr(true),
 				},
 				ContextConfigs: []*config.ContextConfig{},
 			},
@@ -154,7 +192,7 @@ func TestSetAndUnsetConfig(t *testing.T) {
 			value:       "true",
 			global:      true,
 			expectedSetCfg: &config.GlobalConfig{
-				Global:         &config.ContextConfig{UpdateCheck: util.BoolPtr(true)},
+				Global:         &config.ContextConfig{UpdateCheck: util.Ptr(true)},
 				ContextConfigs: []*config.ContextConfig{},
 			},
 			expectedUnsetCfg: &config.GlobalConfig{
@@ -171,7 +209,7 @@ func TestSetAndUnsetConfig(t *testing.T) {
 			expectedSetCfg: &config.GlobalConfig{
 				Global: &config.ContextConfig{
 					Survey: &config.SurveyConfig{
-						DisablePrompt: util.BoolPtr(true),
+						DisablePrompt: util.Ptr(true),
 					},
 				},
 				ContextConfigs: []*config.ContextConfig{},
@@ -190,7 +228,7 @@ func TestSetAndUnsetConfig(t *testing.T) {
 			expectedSetCfg: &config.GlobalConfig{
 				Global: &config.ContextConfig{
 					Survey: &config.SurveyConfig{
-						DisablePrompt: util.BoolPtr(false),
+						DisablePrompt: util.Ptr(false),
 					},
 				},
 				ContextConfigs: []*config.ContextConfig{},
@@ -213,7 +251,7 @@ func TestSetAndUnsetConfig(t *testing.T) {
 					{
 						Kubecontext: "this_is_a_context",
 						Survey: &config.SurveyConfig{
-							DisablePrompt: util.BoolPtr(false),
+							DisablePrompt: util.Ptr(false),
 						},
 					},
 				},
@@ -227,6 +265,105 @@ func TestSetAndUnsetConfig(t *testing.T) {
 				},
 			},
 		},
+		{
+			description: "set kind disable load",
+			key:         "kind-disable-load",
+			value:       "true",
+			kubecontext: "this_is_a_context",
+			expectedSetCfg: &config.GlobalConfig{
+				ContextConfigs: []*config.ContextConfig{
+					{
+						Kubecontext:     "this_is_a_context",
+						KindDisableLoad: util.Ptr(true),
+					},
+				},
+			},
+			expectedUnsetCfg: &config.GlobalConfig{
+				ContextConfigs: []*config.ContextConfig{
+					{
+						Kubecontext: "this_is_a_context",
+					},
+				},
+			},
+		},
+		{
+			description: "set global kind disable load",
+			key:         "kind-disable-load",
+			value:       "true",
+			global:      true,
+			expectedSetCfg: &config.GlobalConfig{
+				Global: &config.ContextConfig{
+					KindDisableLoad: util.Ptr(true),
+				},
+				ContextConfigs: []*config.ContextConfig{},
+			},
+			expectedUnsetCfg: &config.GlobalConfig{
+				Global:         &config.ContextConfig{},
+				ContextConfigs: []*config.ContextConfig{},
+			},
+		},
+		{
+			description: "set k3d disable load",
+			key:         "k3d-disable-load",
+			value:       "true",
+			kubecontext: "this_is_a_context",
+			expectedSetCfg: &config.GlobalConfig{
+				ContextConfigs: []*config.ContextConfig{
+					{
+						Kubecontext:    "this_is_a_context",
+						K3dDisableLoad: util.Ptr(true),
+					},
+				},
+			},
+			expectedUnsetCfg: &config.GlobalConfig{
+				ContextConfigs: []*config.ContextConfig{
+					{
+						Kubecontext: "this_is_a_context",
+					},
+				},
+			},
+		},
+		{
+			description: "set global k3d disable load",
+			key:         "k3d-disable-load",
+			value:       "true",
+			global:      true,
+			expectedSetCfg: &config.GlobalConfig{
+				Global: &config.ContextConfig{
+					K3dDisableLoad: util.Ptr(true),
+				},
+				ContextConfigs: []*config.ContextConfig{},
+			},
+			expectedUnsetCfg: &config.GlobalConfig{
+				Global:         &config.ContextConfig{},
+				ContextConfigs: []*config.ContextConfig{},
+			},
+		},
+		{
+			description: "set global survey id taken for a key",
+			key:         "taken",
+			value:       "true",
+			global:      true,
+			survey:      true,
+			surveyID:    "helm",
+			expectedSetCfg: &config.GlobalConfig{
+				Global: &config.ContextConfig{
+					Survey: &config.SurveyConfig{
+						UserSurveys: []*config.UserSurvey{
+							{ID: "helm", Taken: util.Ptr(true)}}},
+				},
+				ContextConfigs: []*config.ContextConfig{},
+			},
+			expectedUnsetCfg: &config.GlobalConfig{
+				Global: &config.ContextConfig{
+					Survey: &config.SurveyConfig{
+						UserSurveys: []*config.UserSurvey{
+							{ID: "helm"}},
+					},
+				},
+				ContextConfigs: []*config.ContextConfig{},
+			},
+		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
@@ -237,6 +374,7 @@ func TestSetAndUnsetConfig(t *testing.T) {
 			t.Override(&configFile, cfg)
 			t.Override(&global, test.global)
 			t.Override(&survey, test.survey)
+			t.Override(&surveyID, test.surveyID)
 			if test.kubecontext != "" {
 				t.Override(&kubecontext, test.kubecontext)
 			} else {
@@ -244,7 +382,7 @@ func TestSetAndUnsetConfig(t *testing.T) {
 			}
 
 			// set specified value
-			err := Set(context.Background(), ioutil.Discard, []string{test.key, test.value})
+			err := Set(context.Background(), io.Discard, []string{test.key, test.value})
 			actualConfig, cfgErr := config.ReadConfigFile(cfg)
 			t.CheckNoError(cfgErr)
 			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expectedSetCfg, actualConfig)
@@ -255,7 +393,7 @@ func TestSetAndUnsetConfig(t *testing.T) {
 			}
 
 			// unset the value
-			err = Unset(context.Background(), ioutil.Discard, []string{test.key})
+			err = Unset(context.Background(), io.Discard, []string{test.key})
 			newConfig, cfgErr := config.ReadConfigFile(cfg)
 			t.CheckNoError(cfgErr)
 
@@ -277,7 +415,7 @@ func TestGetConfigStructWithIndex(t *testing.T) {
 			description: "survey flag set",
 			cfg:         &config.ContextConfig{},
 			survey:      true,
-			expectedIdx: []int{6},
+			expectedIdx: []int{7},
 		},
 		{
 			description: "no survey flag set",

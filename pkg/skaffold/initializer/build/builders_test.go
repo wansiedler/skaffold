@@ -21,13 +21,13 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/buildpacks"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/jib"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/tag"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/initializer/prompt"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/warnings"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/buildpacks"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/jib"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/initializer/prompt"
+	tag "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/tag/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/warnings"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestResolveBuilderImages(t *testing.T) {
@@ -38,22 +38,22 @@ func TestResolveBuilderImages(t *testing.T) {
 		force                  bool
 		shouldMakeChoice       bool
 		shouldErr              bool
-		expectedPairs          []BuilderImagePair
-		expectedGeneratedPairs []GeneratedBuilderImagePair
+		expectedInfos          []ArtifactInfo
+		expectedGeneratedInfos []GeneratedArtifactInfo
 	}{
 		{
 			description:      "nothing to choose from",
 			buildConfigs:     []InitBuilder{},
 			images:           []string{},
 			shouldMakeChoice: false,
-			expectedPairs:    nil,
+			expectedInfos:    nil,
 		},
 		{
 			description:      "don't prompt for single dockerfile and image",
 			buildConfigs:     []InitBuilder{docker.ArtifactConfig{File: "Dockerfile1"}},
 			images:           []string{"image1"},
 			shouldMakeChoice: false,
-			expectedPairs: []BuilderImagePair{
+			expectedInfos: []ArtifactInfo{
 				{
 					Builder:   docker.ArtifactConfig{File: "Dockerfile1"},
 					ImageName: "image1",
@@ -65,7 +65,7 @@ func TestResolveBuilderImages(t *testing.T) {
 			buildConfigs:     []InitBuilder{docker.ArtifactConfig{File: "Dockerfile1"}, jib.ArtifactConfig{BuilderName: jib.PluginName(jib.JibGradle), File: "build.gradle"}, jib.ArtifactConfig{BuilderName: jib.PluginName(jib.JibMaven), Project: "project", File: "pom.xml"}},
 			images:           []string{"image1", "image2"},
 			shouldMakeChoice: true,
-			expectedPairs: []BuilderImagePair{
+			expectedInfos: []ArtifactInfo{
 				{
 					Builder:   docker.ArtifactConfig{File: "Dockerfile1"},
 					ImageName: "image1",
@@ -75,11 +75,11 @@ func TestResolveBuilderImages(t *testing.T) {
 					ImageName: "image2",
 				},
 			},
-			expectedGeneratedPairs: []GeneratedBuilderImagePair{
+			expectedGeneratedInfos: []GeneratedArtifactInfo{
 				{
-					BuilderImagePair: BuilderImagePair{
+					ArtifactInfo: ArtifactInfo{
 						Builder:   jib.ArtifactConfig{BuilderName: "Jib Maven Plugin", File: "pom.xml", Project: "project"},
-						ImageName: "pom.xml-image",
+						ImageName: "pom-xml-image",
 					},
 					ManifestPath: "deployment.yaml",
 				},
@@ -91,9 +91,22 @@ func TestResolveBuilderImages(t *testing.T) {
 			images:           []string{"image1"},
 			shouldMakeChoice: false,
 			force:            true,
-			expectedPairs: []BuilderImagePair{
+			expectedInfos: []ArtifactInfo{
 				{
 					Builder:   jib.ArtifactConfig{BuilderName: jib.PluginName(jib.JibGradle), File: "build.gradle"},
+					ImageName: "image1",
+				},
+			},
+		},
+		{
+			description:      "successful force - 1 image 2 builders",
+			buildConfigs:     []InitBuilder{docker.ArtifactConfig{File: "Dockerfile1"}, jib.ArtifactConfig{BuilderName: jib.PluginName(jib.JibGradle), File: "build.gradle"}},
+			images:           []string{"image1"},
+			shouldMakeChoice: true,
+			force:            true,
+			expectedInfos: []ArtifactInfo{
+				{
+					Builder:   docker.ArtifactConfig{File: "Dockerfile1"},
 					ImageName: "image1",
 				},
 			},
@@ -110,9 +123,9 @@ func TestResolveBuilderImages(t *testing.T) {
 			description:  "one unresolved image",
 			buildConfigs: []InitBuilder{docker.ArtifactConfig{File: "foo"}},
 			images:       []string{},
-			expectedGeneratedPairs: []GeneratedBuilderImagePair{
+			expectedGeneratedInfos: []GeneratedArtifactInfo{
 				{
-					BuilderImagePair: BuilderImagePair{
+					ArtifactInfo: ArtifactInfo{
 						Builder:   docker.ArtifactConfig{File: "foo"},
 						ImageName: "foo-image",
 					},
@@ -126,6 +139,9 @@ func TestResolveBuilderImages(t *testing.T) {
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
+			t.Override(&prompt.ChooseBuildersFunc, func(choices []string) ([]string, error) {
+				return choices, nil
+			})
 			// Overrides prompt.BuildConfigFunc to choose first option rather than using the interactive menu
 			t.Override(&prompt.BuildConfigFunc, func(image string, choices []string) (string, error) {
 				if !test.shouldMakeChoice {
@@ -140,8 +156,8 @@ func TestResolveBuilderImages(t *testing.T) {
 				unresolvedImages: test.images,
 			}
 			err := initializer.resolveBuilderImages()
-			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expectedPairs, initializer.builderImagePairs, cmp.AllowUnexported())
-			t.CheckDeepEqual(test.expectedGeneratedPairs, initializer.generatedBuilderImagePairs, cmp.AllowUnexported())
+			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expectedInfos, initializer.artifactInfos, cmp.AllowUnexported())
+			t.CheckDeepEqual(test.expectedGeneratedInfos, initializer.generatedArtifactInfos, cmp.AllowUnexported())
 		})
 	}
 }
@@ -151,7 +167,7 @@ func TestAutoSelectBuilders(t *testing.T) {
 		description              string
 		builderConfigs           []InitBuilder
 		images                   []string
-		expectedPairs            []BuilderImagePair
+		expectedInfos            []ArtifactInfo
 		expectedBuildersLeft     []InitBuilder
 		expectedUnresolvedImages []string
 	}{
@@ -163,7 +179,7 @@ func TestAutoSelectBuilders(t *testing.T) {
 				jib.ArtifactConfig{BuilderName: jib.PluginName(jib.JibMaven), File: "pom.xml", Image: "not a k8s image"},
 			},
 			images:        []string{"image1", "image2"},
-			expectedPairs: nil,
+			expectedInfos: nil,
 			expectedBuildersLeft: []InitBuilder{
 				docker.ArtifactConfig{File: "Dockerfile"},
 				jib.ArtifactConfig{BuilderName: jib.PluginName(jib.JibGradle), File: "build.gradle"},
@@ -179,14 +195,14 @@ func TestAutoSelectBuilders(t *testing.T) {
 				jib.ArtifactConfig{BuilderName: jib.PluginName(jib.JibMaven), File: "pom.xml", Image: "image2"},
 			},
 			images: []string{"image1", "image2", "image3"},
-			expectedPairs: []BuilderImagePair{
+			expectedInfos: []ArtifactInfo{
 				{
-					jib.ArtifactConfig{BuilderName: jib.PluginName(jib.JibGradle), File: "build.gradle", Image: "image1"},
-					"image1",
+					Builder:   jib.ArtifactConfig{BuilderName: jib.PluginName(jib.JibGradle), File: "build.gradle", Image: "image1"},
+					ImageName: "image1",
 				},
 				{
-					jib.ArtifactConfig{BuilderName: jib.PluginName(jib.JibMaven), File: "pom.xml", Image: "image2"},
-					"image2",
+					Builder:   jib.ArtifactConfig{BuilderName: jib.PluginName(jib.JibMaven), File: "pom.xml", Image: "image2"},
+					ImageName: "image2",
 				},
 			},
 			expectedBuildersLeft:     []InitBuilder{docker.ArtifactConfig{File: "Dockerfile"}},
@@ -199,7 +215,7 @@ func TestAutoSelectBuilders(t *testing.T) {
 				jib.ArtifactConfig{BuilderName: jib.PluginName(jib.JibMaven), File: "pom.xml", Image: "image1"},
 			},
 			images:        []string{"image1", "image2"},
-			expectedPairs: nil,
+			expectedInfos: nil,
 			expectedBuildersLeft: []InitBuilder{
 				jib.ArtifactConfig{BuilderName: jib.PluginName(jib.JibGradle), File: "build.gradle", Image: "image1"},
 				jib.ArtifactConfig{BuilderName: jib.PluginName(jib.JibMaven), File: "pom.xml", Image: "image1"},
@@ -210,7 +226,7 @@ func TestAutoSelectBuilders(t *testing.T) {
 			description:              "show unique image names",
 			builderConfigs:           nil,
 			images:                   []string{"image1", "image1"},
-			expectedPairs:            nil,
+			expectedInfos:            nil,
 			expectedBuildersLeft:     nil,
 			expectedUnresolvedImages: []string{"image1"},
 		},
@@ -220,7 +236,7 @@ func TestAutoSelectBuilders(t *testing.T) {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			pairs, builderConfigs, unresolvedImages := matchBuildersToImages(test.builderConfigs, test.images)
 
-			t.CheckDeepEqual(test.expectedPairs, pairs)
+			t.CheckDeepEqual(test.expectedInfos, pairs)
 			t.CheckDeepEqual(test.expectedBuildersLeft, builderConfigs)
 			t.CheckDeepEqual(test.expectedUnresolvedImages, unresolvedImages)
 		})
@@ -229,10 +245,11 @@ func TestAutoSelectBuilders(t *testing.T) {
 
 func TestProcessCliArtifacts(t *testing.T) {
 	tests := []struct {
-		description   string
-		artifacts     []string
-		shouldErr     bool
-		expectedPairs []BuilderImagePair
+		description        string
+		artifacts          []string
+		shouldErr          bool
+		expectedInfos      []ArtifactInfo
+		expectedWorkspaces []string
 	}{
 		{
 			description: "Invalid pairs",
@@ -250,7 +267,7 @@ func TestProcessCliArtifacts(t *testing.T) {
 				`/path/to/Dockerfile=image1`,
 				`/path/to/Dockerfile2=image2`,
 			},
-			expectedPairs: []BuilderImagePair{
+			expectedInfos: []ArtifactInfo{
 				{
 					Builder:   docker.ArtifactConfig{File: "/path/to/Dockerfile"},
 					ImageName: "image1",
@@ -264,19 +281,21 @@ func TestProcessCliArtifacts(t *testing.T) {
 		{
 			description: "Valid",
 			artifacts: []string{
-				`{"builder":"Docker","payload":{"path":"/path/to/Dockerfile"},"image":"image1"}`,
-				`{"builder":"Jib Gradle Plugin","payload":{"path":"/path/to/build.gradle"},"image":"image2"}`,
+				`{"builder":"Docker","payload":{"path":"/path/to/Dockerfile"},"image":"image1", "context": "path/to/docker/workspace"}`,
+				`{"builder":"Jib Gradle Plugin","payload":{"path":"/path/to/build.gradle"},"image":"image2", "context":"path/to/jib/workspace"}`,
 				`{"builder":"Jib Maven Plugin","payload":{"path":"/path/to/pom.xml","project":"project-name","image":"testImage"},"image":"image3"}`,
 				`{"builder":"Buildpacks","payload":{"path":"/path/to/package.json"},"image":"image4"}`,
 			},
-			expectedPairs: []BuilderImagePair{
+			expectedInfos: []ArtifactInfo{
 				{
 					Builder:   docker.ArtifactConfig{File: "/path/to/Dockerfile"},
 					ImageName: "image1",
+					Workspace: "path/to/docker/workspace",
 				},
 				{
 					Builder:   jib.ArtifactConfig{BuilderName: "Jib Gradle Plugin", File: "/path/to/build.gradle"},
 					ImageName: "image2",
+					Workspace: "path/to/jib/workspace",
 				},
 				{
 					Builder:   jib.ArtifactConfig{BuilderName: "Jib Maven Plugin", File: "/path/to/pom.xml", Project: "project-name", Image: "testImage"},
@@ -294,7 +313,7 @@ func TestProcessCliArtifacts(t *testing.T) {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			pairs, err := processCliArtifacts(test.artifacts)
 
-			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expectedPairs, pairs)
+			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expectedInfos, pairs)
 		})
 	}
 }
@@ -335,9 +354,7 @@ func TestStripImageTags(t *testing.T) {
 			expectedImages: []string{
 				"gcr.io/testproject/testimage",
 			},
-			expectedWarnings: []string{
-				"Couldn't parse image [{{ REPOSITORY }}/{{IMAGE}}]: invalid reference format",
-			},
+			expectedWarnings: nil,
 		},
 		{
 			description: "images with digest are ignored",
@@ -356,7 +373,7 @@ func TestStripImageTags(t *testing.T) {
 			fakeWarner := &warnings.Collect{}
 			t.Override(&warnings.Printf, fakeWarner.Warnf)
 
-			images := tag.StripTags(test.taggedImages)
+			images := tag.StripTags(test.taggedImages, true)
 
 			t.CheckDeepEqual(test.expectedImages, images)
 			t.CheckDeepEqual(test.expectedWarnings, fakeWarner.Warnings)

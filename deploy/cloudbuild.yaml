@@ -1,6 +1,24 @@
 # using default substitutions, provided by Google Cloud Build
 # see: https://cloud.google.com/container-builder/docs/configuring-builds/substitute-variable-values#using_default_substitutions
 steps:
+# Build and tag skaffold-deps image using docker with cache-from
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+    - 'build'
+    - '-t'
+    - 'gcr.io/$PROJECT_ID/build_deps:latest'
+    - '--cache-from'
+    - 'gcr.io/k8s-skaffold/build_deps:latest'
+    - '-f'
+    - 'deploy/skaffold/Dockerfile.deps'
+    - '.'
+
+# Grab secret credentials from gcp bucket
+  - name: gcr.io/cloud-builders/gcloud
+    entrypoint: 'bash'
+    args: ['deploy/setup-secret.sh','-p', $PROJECT_ID]
+
+# Build and tag skaffold builder
   - name: 'gcr.io/cloud-builders/docker'
     args:
     - 'build'
@@ -9,6 +27,18 @@ steps:
     - '-f'
     - 'deploy/skaffold/Dockerfile'
     - '.'
+
+# Build and tag distroless-skaffold image for scanning
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--build-arg'
+      - 'PROJECT_ID=$PROJECT_ID'
+      - '-t'
+      - 'us-east1-docker.pkg.dev/$PROJECT_ID/scanning/skaffold:edge'
+      - '-f'
+      - 'deploy/skaffold/Dockerfile.skaffold'
+      - '.'
 
 # Do the go build & push the results to GCS
   - name: 'gcr.io/$PROJECT_ID/skaffold-builder:latest'
@@ -25,10 +55,12 @@ steps:
     - 'version'
 
 images:
+- 'gcr.io/$PROJECT_ID/build_deps:latest'
 - 'gcr.io/$PROJECT_ID/skaffold:edge'
 - 'gcr.io/$PROJECT_ID/skaffold:$COMMIT_SHA'
+- 'us-east1-docker.pkg.dev/$PROJECT_ID/scanning/skaffold:edge'
 
 options:
   machineType: 'N1_HIGHCPU_8'
 
-timeout: 1200s
+timeout: 1500s

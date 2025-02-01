@@ -7,15 +7,45 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/buildpacks/pack/internal/config"
-	"github.com/buildpacks/pack/internal/dist"
-	"github.com/buildpacks/pack/internal/paths"
 	"github.com/buildpacks/pack/internal/style"
+	"github.com/buildpacks/pack/pkg/buildpack"
+	"github.com/buildpacks/pack/pkg/dist"
 )
+
+const defaultOS = "linux"
 
 // Config encapsulates the possible configuration options for buildpackage creation.
 type Config struct {
 	Buildpack    dist.BuildpackURI `toml:"buildpack"`
+	Extension    dist.BuildpackURI `toml:"extension"`
 	Dependencies []dist.ImageOrURI `toml:"dependencies"`
+	// deprecated
+	Platform dist.Platform `toml:"platform"`
+
+	// Define targets for composite buildpacks
+	Targets []dist.Target `toml:"targets"`
+}
+
+func DefaultConfig() Config {
+	return Config{
+		Buildpack: dist.BuildpackURI{
+			URI: ".",
+		},
+		Platform: dist.Platform{
+			OS: defaultOS,
+		},
+	}
+}
+
+func DefaultExtensionConfig() Config {
+	return Config{
+		Extension: dist.BuildpackURI{
+			URI: ".",
+		},
+		Platform: dist.Platform{
+			OS: defaultOS,
+		},
+	}
 }
 
 // NewConfigReader returns an instance of ConfigReader. It does not take any parameters.
@@ -47,8 +77,20 @@ func (r *ConfigReader) Read(path string) (Config, error) {
 		)
 	}
 
-	if packageConfig.Buildpack.URI == "" {
-		return packageConfig, errors.Errorf("missing %s configuration", style.Symbol("buildpack.uri"))
+	if packageConfig.Buildpack.URI == "" && packageConfig.Extension.URI == "" {
+		if packageConfig.Buildpack.URI == "" {
+			return packageConfig, errors.Errorf("missing %s configuration", style.Symbol("buildpack.uri"))
+		}
+		return packageConfig, errors.Errorf("missing %s configuration", style.Symbol("extension.uri"))
+	}
+
+	if packageConfig.Platform.OS == "" {
+		packageConfig.Platform.OS = defaultOS
+	}
+
+	if packageConfig.Platform.OS != "linux" && packageConfig.Platform.OS != "windows" {
+		return packageConfig, errors.Errorf("invalid %s configuration: only [%s, %s] is permitted, found %s",
+			style.Symbol("platform.os"), style.Symbol("linux"), style.Symbol("windows"), style.Symbol(packageConfig.Platform.OS))
 	}
 
 	configDir, err := filepath.Abs(filepath.Dir(path))
@@ -56,24 +98,11 @@ func (r *ConfigReader) Read(path string) (Config, error) {
 		return packageConfig, err
 	}
 
-	absPath, err := paths.ToAbsolute(packageConfig.Buildpack.URI, configDir)
-	if err != nil {
-		return packageConfig, errors.Wrapf(err, "getting absolute path for %s", style.Symbol(packageConfig.Buildpack.URI))
+	if err := validateURI(packageConfig.Buildpack.URI, configDir); err != nil {
+		return packageConfig, err
 	}
-	packageConfig.Buildpack.URI = absPath
 
-	for i := range packageConfig.Dependencies {
-		uri := packageConfig.Dependencies[i].URI
-		if uri != "" {
-			absPath, err := paths.ToAbsolute(uri, configDir)
-			if err != nil {
-				return packageConfig, errors.Wrapf(err, "getting absolute path for %s", style.Symbol(uri))
-			}
-
-			packageConfig.Dependencies[i].URI = absPath
-		}
-
-		dep := packageConfig.Dependencies[i]
+	for _, dep := range packageConfig.Dependencies {
 		if dep.URI != "" && dep.ImageName != "" {
 			return packageConfig, errors.Errorf(
 				"dependency configured with both %s and %s",
@@ -81,7 +110,37 @@ func (r *ConfigReader) Read(path string) (Config, error) {
 				style.Symbol("image"),
 			)
 		}
+
+		if dep.URI != "" {
+			if err := validateURI(dep.URI, configDir); err != nil {
+				return packageConfig, err
+			}
+		}
 	}
 
 	return packageConfig, nil
+}
+
+func (r *ConfigReader) ReadBuildpackDescriptor(path string) (dist.BuildpackDescriptor, error) {
+	buildpackCfg := dist.BuildpackDescriptor{}
+
+	_, err := toml.DecodeFile(path, &buildpackCfg)
+	if err != nil {
+		return dist.BuildpackDescriptor{}, err
+	}
+
+	return buildpackCfg, nil
+}
+
+func validateURI(uri, relativeBaseDir string) error {
+	locatorType, err := buildpack.GetLocatorType(uri, relativeBaseDir, nil)
+	if err != nil {
+		return err
+	}
+
+	if locatorType == buildpack.InvalidLocator {
+		return errors.Errorf("invalid locator %s", style.Symbol(uri))
+	}
+
+	return nil
 }

@@ -1,6 +1,6 @@
-apiVersion: skaffold/v2beta6
+apiVersion: skaffold/v4beta12
 kind: Config
 deploy:
   kustomize:
     buildArgs:
-      - "--load_restrictor none"
+      - "--load-restrictor LoadRestrictionsNone"

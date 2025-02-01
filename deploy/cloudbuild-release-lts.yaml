@@ -1,0 +1,32 @@
+# using default substitutions, provided by Google Cloud Build
+# see: https://cloud.google.com/container-builder/docs/configuring-builds/substitute-variable-values#using_default_substitutions
+steps:
+
+# Build and tag skaffold-deps image using docker with cache-from
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+    - 'build'
+    - '--build-arg'
+    - 'SKAFFOLD_VERSION=$TAG_NAME'
+    - '-t'
+    - 'gcr.io/$PROJECT_ID/skaffold:$TAG_NAME-lts'
+    - '-t'
+    - 'gcr.io/$PROJECT_ID/skaffold:$_SCANNING_MARKER-lts'
+    - '-f'
+    - 'deploy/skaffold/Dockerfile.lts'
+    - '.'
+
+# Check that skaffold is in the image
+  - name: 'gcr.io/$PROJECT_ID/skaffold:$TAG_NAME-lts'
+    args:
+    - 'skaffold'
+    - 'version'
+
+images:
+- 'gcr.io/$PROJECT_ID/skaffold:$TAG_NAME-lts'
+- 'gcr.io/$PROJECT_ID/skaffold:$_SCANNING_MARKER-lts'
+
+options:
+  machineType: 'N1_HIGHCPU_8'
+
+timeout: 1500s

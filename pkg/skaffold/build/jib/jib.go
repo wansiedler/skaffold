@@ -28,15 +28,16 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/sirupsen/logrus"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/walk"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/walk"
 )
 
 const (
@@ -50,6 +51,8 @@ const (
 	JibMaven  PluginType = "maven"
 	JibGradle PluginType = "gradle"
 )
+
+var mutex sync.Mutex
 
 // IsKnown checks that the num value is a known value (vs 0 or an unknown value).
 func (t PluginType) IsKnown() bool {
@@ -101,23 +104,31 @@ func GetBuildDefinitions(workspace string, a *latest.JibArtifact) []string {
 
 // GetDependencies returns a list of files to watch for changes to rebuild
 func GetDependencies(ctx context.Context, workspace string, artifact *latest.JibArtifact) ([]string, error) {
-	t, err := DeterminePluginType(workspace, artifact)
+	t, err := DeterminePluginType(ctx, workspace, artifact)
 	if err != nil {
-		return nil, err
+		return nil, unableToDeterminePluginType(workspace, err)
 	}
-
+	// both getDependencies methods need to call refreshDependencyList method which will download deps from maven,
+	// calling refreshDependencyList concurrently will cause some processes mistakenly use those deps are still in
+	// downloading, will end up deps not found error see https://github.com/GoogleContainerTools/skaffold/issues/7409.
+	mutex.Lock()
+	defer mutex.Unlock()
 	switch t {
 	case JibMaven:
 		return getDependenciesMaven(ctx, workspace, artifact)
 	case JibGradle:
 		return getDependenciesGradle(ctx, workspace, artifact)
 	default:
-		return nil, fmt.Errorf("unable to determine Jib builder type for %s", workspace)
+		return nil, unknownPluginType(workspace)
 	}
 }
 
 // DeterminePluginType tries to determine the Jib plugin type for the given artifact.
-func DeterminePluginType(workspace string, artifact *latest.JibArtifact) (PluginType, error) {
+func DeterminePluginType(ctx context.Context, workspace string, artifact *latest.JibArtifact) (PluginType, error) {
+	if !JVMFound(ctx) {
+		return "", errors.New("no working JVM available")
+	}
+
 	// check if explicitly specified
 	if artifact != nil {
 		if t := PluginType(artifact.Type); t.IsKnown() {
@@ -139,7 +150,7 @@ func DeterminePluginType(workspace string, artifact *latest.JibArtifact) (Plugin
 }
 
 // getDependencies returns a list of files to watch for changes to rebuild
-func getDependencies(workspace string, cmd exec.Cmd, a *latest.JibArtifact) ([]string, error) {
+func getDependencies(ctx context.Context, workspace string, cmd exec.Cmd, a *latest.JibArtifact) ([]string, error) {
 	var dependencyList []string
 	files, ok := watchedFiles[getProjectKey(workspace, a)]
 	if !ok {
@@ -153,13 +164,13 @@ func getDependencies(workspace string, cmd exec.Cmd, a *latest.JibArtifact) ([]s
 		}
 
 		// Refresh dependency list if empty
-		if err := refreshDependencyList(&files, cmd); err != nil {
+		if err := refreshDependencyList(ctx, &files, cmd); err != nil {
 			return nil, fmt.Errorf("initial Jib dependency refresh failed: %w", err)
 		}
 	} else if err := walkFiles(workspace, files.BuildDefinitions, files.Results, func(path string, info os.FileInfo) error {
 		// Walk build files to check for changes
 		if val, ok := files.BuildFileTimes[path]; !ok || info.ModTime() != val {
-			return refreshDependencyList(&files, cmd)
+			return refreshDependencyList(ctx, &files, cmd)
 		}
 		return nil
 	}); err != nil {
@@ -189,8 +200,8 @@ func getDependencies(workspace string, cmd exec.Cmd, a *latest.JibArtifact) ([]s
 }
 
 // refreshDependencyList calls out to Jib to update files with the latest list of files/directories to watch.
-func refreshDependencyList(files *filesLists, cmd exec.Cmd) error {
-	stdout, err := util.RunCmdOut(&cmd)
+func refreshDependencyList(ctx context.Context, files *filesLists, cmd exec.Cmd) error {
+	stdout, err := util.RunCmdOut(ctx, &cmd)
 	if err != nil {
 		return fmt.Errorf("failed to get Jib dependencies: %w", err)
 	}
@@ -206,7 +217,7 @@ func refreshDependencyList(files *filesLists, cmd exec.Cmd) error {
 		return errors.New("failed to get Jib dependencies")
 	}
 
-	line := bytes.Replace(matches[1], []byte(`\`), []byte(`\\`), -1)
+	line := bytes.ReplaceAll(matches[1], []byte(`\`), []byte(`\\`))
 	return json.Unmarshal(line, &files)
 }
 
@@ -230,7 +241,7 @@ func walkFiles(workspace string, watchedFiles []string, ignoredFiles []string, c
 		info, err := os.Stat(dep)
 		if err != nil {
 			if os.IsNotExist(err) {
-				logrus.Debugf("could not stat dependency: %s", err)
+				log.Entry(context.TODO()).Debugf("could not stat dependency: %s", err)
 				continue // Ignore files that don't exist
 			}
 			return fmt.Errorf("unable to stat file %q: %w", dep, err)
@@ -325,4 +336,27 @@ func isOnInsecureRegistry(image string, insecureRegistries map[string]bool) (boo
 	}
 
 	return docker.IsInsecure(ref, insecureRegistries), nil
+}
+
+// baseImageArg formats the base image as a build argument. It also replaces the provided base image with an image from the required artifacts if specified.
+func baseImageArg(a *latest.JibArtifact, r ArtifactResolver, deps []*latest.ArtifactDependency, pushImages bool) (string, bool) {
+	if a.BaseImage == "" {
+		return "", false
+	}
+	for _, d := range deps {
+		if a.BaseImage != d.Alias {
+			continue
+		}
+		img, found := r.GetImageTag(d.ImageName)
+		if !found {
+			log.Entry(context.TODO()).Fatalf("failed to resolve build result for required artifact %q", d.ImageName)
+		}
+		if pushImages {
+			// pull image from the registry (prefix `registry://` is optional)
+			return fmt.Sprintf("-Djib.from.image=%s", img), true
+		}
+		// must use `docker://` prefix to retrieve image from the local docker daemon
+		return fmt.Sprintf("-Djib.from.image=docker://%s", img), true
+	}
+	return fmt.Sprintf("-Djib.from.image=%s", a.BaseImage), true
 }

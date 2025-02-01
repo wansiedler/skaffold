@@ -17,17 +17,19 @@ limitations under the License.
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/blang/semver"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/update"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/validation"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/update"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestCreateNewRunner(t *testing.T) {
@@ -71,7 +73,7 @@ func TestCreateNewRunner(t *testing.T) {
 				Profiles:          []string{"unknown-profile"},
 			},
 			shouldErr:     true,
-			expectedError: "applying profiles",
+			expectedError: `profile selection ["unknown-profile"] did not match those defined in any configurations`,
 		},
 		{
 			description: "unsupported trigger",
@@ -86,9 +88,13 @@ func TestCreateNewRunner(t *testing.T) {
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			t.Override(&docker.NewAPIClient, func(*runcontext.RunContext) (docker.LocalDaemon, error) {
-				return nil, nil
+			t.Override(&validation.DefaultConfig, validation.Options{CheckDeploySource: false})
+			t.Override(&docker.NewAPIClient, func(context.Context, docker.Config) (docker.LocalDaemon, error) {
+				return docker.NewLocalDaemon(&testutil.FakeAPIClient{
+					ErrVersion: true,
+				}, nil, false, nil), nil
 			})
+
 			t.Override(&update.GetLatestAndCurrentVersion, func() (semver.Version, semver.Version, error) {
 				return semver.Version{}, semver.Version{}, nil
 			})
@@ -96,7 +102,7 @@ func TestCreateNewRunner(t *testing.T) {
 				Write("skaffold.yaml", fmt.Sprintf("apiVersion: %s\nkind: Config\n%s", latest.Version, test.config)).
 				Chdir()
 
-			_, _, err := createNewRunner(test.options)
+			_, _, _, err := createNewRunner(context.Background(), io.Discard, test.options)
 
 			t.CheckError(test.shouldErr, err)
 			if test.expectedError != "" {

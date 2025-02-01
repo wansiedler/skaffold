@@ -17,28 +17,34 @@ limitations under the License.
 package config
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/imdario/mergo"
+	"dario.cat/mergo"
 	"github.com/mitchellh/go-homedir"
-	"github.com/sirupsen/logrus"
+	api_errors "k8s.io/apimachinery/pkg/api/errors"
+	api_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
-	kubectx "github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes/context"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/yaml"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/cluster"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/constants"
+	kubeclient "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/client"
+	kubectx "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/context"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	timeutil "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util/time"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/yaml"
 )
 
 const (
 	defaultConfigDir  = ".skaffold"
 	defaultConfigFile = "config"
-	tenDays           = time.Hour * 24 * 10
-	threeMonths       = time.Hour * 24 * 90
 )
 
 var (
@@ -54,10 +60,13 @@ var (
 
 	ReadConfigFile             = readConfigFileCached
 	GetConfigForCurrentKubectx = getConfigForCurrentKubectx
-	current                    = time.Now
+	DiscoverLocalRegistry      = discoverLocalRegistry
+
+	current = time.Now
 
 	// update global config with the time the survey was last taken
 	updateLastTaken = "skaffold config set --survey --global last-taken %s"
+	updateUserTaken = "skaffold config set --survey --global --id %s taken true"
 	// update global config with the time the survey was last prompted
 	updateLastPrompted = "skaffold config set --survey --global last-prompted %s"
 )
@@ -70,9 +79,13 @@ func readConfigFileCached(filename string) (*GlobalConfig, error) {
 		filenameOrDefault, err := ResolveConfigFile(filename)
 		if err != nil {
 			configFileErr = err
+			log.Entry(context.TODO()).Warnf("Could not load global Skaffold defaults. Error resolving config file %q", filenameOrDefault)
 			return
 		}
 		configFile, configFileErr = ReadConfigFileNoCache(filenameOrDefault)
+		if configFileErr == nil {
+			log.Entry(context.TODO()).Infof("Loaded Skaffold defaults from %q", filenameOrDefault)
+		}
 	})
 	return configFile, configFileErr
 }
@@ -92,12 +105,14 @@ func ResolveConfigFile(configFile string) (string, error) {
 // ReadConfigFileNoCache reads the given config yaml file and unmarshals the contents.
 // Only visible for testing, use ReadConfigFile instead.
 func ReadConfigFileNoCache(configFile string) (*GlobalConfig, error) {
-	contents, err := ioutil.ReadFile(configFile)
+	contents, err := os.ReadFile(configFile)
 	if err != nil {
+		log.Entry(context.TODO()).Warnf("Could not load global Skaffold defaults. Error encounter while reading file %q", configFile)
 		return nil, fmt.Errorf("reading global config: %w", err)
 	}
 	config := GlobalConfig{}
 	if err := yaml.Unmarshal(contents, &config); err != nil {
+		log.Entry(context.TODO()).Warnf("Could not load global Skaffold defaults. Error encounter while unmarshalling the contents of file %q", configFile)
 		return nil, fmt.Errorf("unmarshalling global skaffold config: %w", err)
 	}
 	return &config, nil
@@ -135,7 +150,7 @@ func getConfigForKubeContextWithGlobalDefaults(cfg *GlobalConfig, kubeContext st
 	var mergedConfig ContextConfig
 	for _, contextCfg := range cfg.ContextConfigs {
 		if util.RegexEqual(contextCfg.Kubecontext, kubeContext) {
-			logrus.Debugf("found config for context %q", kubeContext)
+			log.Entry(context.TODO()).Debugf("found config for context %q", kubeContext)
 			mergedConfig = *contextCfg
 		}
 	}
@@ -161,28 +176,21 @@ func GetDefaultRepo(configFile string, cliValue *string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
+	if cfg.DefaultRepo != "" {
+		log.Entry(context.TODO()).Infof("Using default-repo=%s from config", cfg.DefaultRepo)
+	}
 	return cfg.DefaultRepo, nil
 }
 
-func GetLocalCluster(configFile string, minikubeProfile string) (bool, error) {
-	if minikubeProfile != "" {
-		return true, nil
-	}
+func GetMultiLevelRepo(configFile string) (*bool, error) {
 	cfg, err := GetConfigForCurrentKubectx(configFile)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	// when set, the local-cluster config takes precedence
-	if cfg.LocalCluster != nil {
-		return *cfg.LocalCluster, nil
+	if cfg.MultiLevelRepo != nil {
+		log.Entry(context.TODO()).Infof("Using multi-level-repo=%t from config", *cfg.MultiLevelRepo)
 	}
-
-	config, err := kubectx.CurrentConfig()
-	if err != nil {
-		return true, err
-	}
-	return isDefaultLocal(config.CurrentContext), nil
+	return cfg.MultiLevelRepo, nil
 }
 
 func GetInsecureRegistries(configFile string) ([]string, error) {
@@ -190,7 +198,9 @@ func GetInsecureRegistries(configFile string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	if len(cfg.InsecureRegistries) > 0 {
+		log.Entry(context.TODO()).Infof("Using insecure-registries=%v from config", cfg.InsecureRegistries)
+	}
 	return cfg.InsecureRegistries, nil
 }
 
@@ -200,26 +210,106 @@ func GetDebugHelpersRegistry(configFile string) (string, error) {
 		return "", err
 	}
 
-	if cfg.DebugHelpersRegistry == "" {
-		return constants.DefaultDebugHelpersRegistry, nil
+	if cfg.DebugHelpersRegistry != "" {
+		log.Entry(context.TODO()).Infof("Using debug-helpers-registry=%s from config", cfg.DebugHelpersRegistry)
+		return cfg.DebugHelpersRegistry, nil
 	}
-
-	return cfg.DebugHelpersRegistry, nil
+	return constants.DefaultDebugHelpersRegistry, nil
 }
 
-func isDefaultLocal(kubeContext string) bool {
-	if kubeContext == constants.DefaultMinikubeContext ||
+type GetClusterOpts struct {
+	ConfigFile      string
+	DefaultRepo     StringOrUndefined
+	MinikubeProfile string
+	DetectMinikube  bool
+}
+
+func GetCluster(ctx context.Context, opts GetClusterOpts) (Cluster, error) {
+	cfg, err := GetConfigForCurrentKubectx(opts.ConfigFile)
+	if err != nil {
+		return Cluster{}, err
+	}
+
+	kubeContext := cfg.Kubecontext
+	isKindCluster, isK3dCluster := IsKindCluster(kubeContext), IsK3dCluster(kubeContext)
+	isMixedPlatform := IsMixedPlatformCluster(ctx, kubeContext)
+
+	var local bool
+	switch {
+	case opts.MinikubeProfile != "":
+		local = true
+
+	case cfg.LocalCluster != nil:
+		log.Entry(context.TODO()).Infof("Using local-cluster=%t from config", *cfg.LocalCluster)
+		local = *cfg.LocalCluster
+
+	case kubeContext == constants.DefaultMinikubeContext ||
 		kubeContext == constants.DefaultDockerForDesktopContext ||
-		kubeContext == constants.DefaultDockerDesktopContext {
-		return true
+		kubeContext == constants.DefaultDockerDesktopContext ||
+		isKindCluster || isK3dCluster:
+		local = true
+
+	case opts.DetectMinikube:
+		local = cluster.GetClient().IsMinikube(ctx, kubeContext)
+
+	default:
+		local = false
+	}
+	var defaultRepo = opts.DefaultRepo
+
+	if local && defaultRepo.Value() == nil {
+		registry, err := DiscoverLocalRegistry(ctx, kubeContext)
+		switch {
+		case err != nil:
+			log.Entry(context.TODO()).Tracef("failed to discover local registry %v", err)
+		case registry != nil:
+			log.Entry(context.TODO()).Infof("using default-repo=%s from cluster configmap", *registry)
+			return Cluster{
+				Local:           local,
+				LoadImages:      false,
+				PushImages:      true,
+				DefaultRepo:     NewStringOrUndefined(registry),
+				IsMixedPlatform: isMixedPlatform,
+			}, nil
+		}
 	}
 
-	return IsKindCluster(kubeContext) || IsK3dCluster(kubeContext)
+	kindDisableLoad := cfg.KindDisableLoad != nil && *cfg.KindDisableLoad
+	k3dDisableLoad := cfg.K3dDisableLoad != nil && *cfg.K3dDisableLoad
+
+	// load images for local kind/k3d cluster unless explicitly disabled
+	loadImages := local && ((isKindCluster && !kindDisableLoad) || (isK3dCluster && !k3dDisableLoad))
+
+	// push images for remote cluster or local kind/k3d cluster with image loading disabled
+	pushImages := !local || (isKindCluster && kindDisableLoad) || (isK3dCluster && k3dDisableLoad)
+
+	return Cluster{
+		Local:           local,
+		LoadImages:      loadImages,
+		PushImages:      pushImages,
+		DefaultRepo:     defaultRepo,
+		IsMixedPlatform: isMixedPlatform,
+	}, nil
 }
 
-// IsImageLoadingRequired checks if the cluster requires loading images into it
-func IsImageLoadingRequired(kubeContext string) bool {
-	return IsKindCluster(kubeContext) || IsK3dCluster(kubeContext)
+func IsMixedPlatformCluster(ctx context.Context, kubeContext string) bool {
+	client, err := kubeclient.Client(kubeContext)
+	if err != nil {
+		return false
+	}
+	nodes, err := client.CoreV1().Nodes().List(ctx, api_v1.ListOptions{})
+	if err != nil || nodes == nil {
+		return false
+	}
+	set := make(map[string]struct{})
+	for _, n := range nodes.Items {
+		set[fmt.Sprintf("%s/%s", n.Status.NodeInfo.OperatingSystem, n.Status.NodeInfo.Architecture)] = struct{}{}
+
+		if len(set) > 1 {
+			return true
+		}
+	}
+	return false
 }
 
 // IsKindCluster checks that the given `kubeContext` is talking to `kind`.
@@ -278,44 +368,90 @@ func K3dClusterName(clusterName string) string {
 	return clusterName
 }
 
+func discoverLocalRegistry(ctx context.Context, kubeContext string) (*string, error) {
+	clientset, err := kubeclient.Client(kubeContext)
+	if err != nil {
+		return nil, err
+	}
+
+	configMap, err := clientset.CoreV1().ConfigMaps("kube-public").Get(ctx, "local-registry-hosting", api_v1.GetOptions{})
+
+	statusErr := &api_errors.StatusError{}
+	switch {
+	case errors.As(err, &statusErr) && statusErr.Status().Code == http.StatusNotFound:
+		return nil, nil
+	case err != nil:
+		return nil, err
+	}
+
+	data, ok := configMap.Data["localRegistryHosting.v1"]
+	if !ok {
+		return nil, errors.New("invalid local-registry-hosting ConfigMap")
+	}
+
+	dst := struct {
+		Host *string `yaml:"host"`
+	}{}
+
+	if err := yaml.Unmarshal([]byte(data), &dst); err != nil {
+		return nil, errors.New("invalid local-registry-hosting ConfigMap")
+	}
+
+	return dst.Host, nil
+}
+
 func IsUpdateCheckEnabled(configfile string) bool {
 	cfg, err := GetConfigForCurrentKubectx(configfile)
 	if err != nil {
 		return true
 	}
+	return IsUpdateCheckEnabledForContext(cfg)
+}
+
+func IsUpdateCheckEnabledForContext(cfg *ContextConfig) bool {
 	return cfg == nil || cfg.UpdateCheck == nil || *cfg.UpdateCheck
 }
 
-func ShouldDisplayPrompt(configfile string) bool {
-	cfg, disabled := isSurveyPromptDisabled(configfile)
-	return !disabled && !recentlyPromptedOrTaken(cfg)
-}
-
-func isSurveyPromptDisabled(configfile string) (*ContextConfig, bool) {
+func ShouldDisplayUpdateMsg(configfile string) bool {
 	cfg, err := GetConfigForCurrentKubectx(configfile)
 	if err != nil {
-		return nil, false
+		return true
 	}
-	return cfg, cfg != nil && cfg.Survey != nil && cfg.Survey.DisablePrompt != nil && *cfg.Survey.DisablePrompt
+	if cfg == nil || cfg.UpdateCheckConfig == nil {
+		return true
+	}
+	return !timeutil.LessThan(cfg.UpdateCheckConfig.LastPrompted, 24*time.Hour)
 }
 
-func recentlyPromptedOrTaken(cfg *ContextConfig) bool {
-	if cfg == nil || cfg.Survey == nil {
-		return false
-	}
-	return lessThan(cfg.Survey.LastTaken, threeMonths) || lessThan(cfg.Survey.LastPrompted, tenDays)
-}
+// UpdateMsgDisplayed updates the `last-prompted` config for `update-config` in
+// the skaffold config
+func UpdateMsgDisplayed(configFile string) error {
+	// Today's date
+	today := current().Format(time.RFC3339)
 
-func lessThan(date string, duration time.Duration) bool {
-	t, err := time.Parse(time.RFC3339, date)
+	configFile, err := ResolveConfigFile(configFile)
 	if err != nil {
-		logrus.Debugf("could not parse data %s", date)
-		return false
+		return err
 	}
-	return current().Sub(t) < duration
+	fullConfig, err := ReadConfigFile(configFile)
+	if err != nil {
+		return err
+	}
+	if !IsUpdateCheckEnabledForContext(fullConfig.Global) {
+		return nil
+	}
+	if fullConfig.Global == nil {
+		fullConfig.Global = &ContextConfig{}
+	}
+	if fullConfig.Global.UpdateCheckConfig == nil {
+		fullConfig.Global.UpdateCheckConfig = &UpdateConfig{}
+	}
+	fullConfig.Global.UpdateCheckConfig.LastPrompted = today
+	err = WriteFullConfig(configFile, fullConfig)
+	return err
 }
 
-func UpdateGlobalSurveyTaken(configFile string) error {
+func UpdateHaTSSurveyTaken(configFile string) error {
 	// Today's date
 	today := current().Format(time.RFC3339)
 	ai := fmt.Sprintf(updateLastTaken, today)
@@ -371,6 +507,26 @@ func UpdateGlobalSurveyPrompted(configFile string) error {
 	return err
 }
 
+func UpdateGlobalCollectMetrics(configFile string, collectMetrics bool) error {
+	configFile, err := ResolveConfigFile(configFile)
+	if err != nil {
+		return err
+	}
+	fullConfig, err := ReadConfigFile(configFile)
+	if err != nil {
+		return err
+	}
+	if fullConfig.Global == nil {
+		fullConfig.Global = &ContextConfig{}
+	}
+	fullConfig.Global.CollectMetrics = &collectMetrics
+	err = WriteFullConfig(configFile, fullConfig)
+	if err != nil {
+		return err
+	}
+	return err
+}
+
 func WriteFullConfig(configFile string, cfg *GlobalConfig) error {
 	contents, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -380,8 +536,43 @@ func WriteFullConfig(configFile string, cfg *GlobalConfig) error {
 	if err != nil {
 		return err
 	}
-	if err := ioutil.WriteFile(configFileOrDefault, contents, 0644); err != nil {
+	if err := os.WriteFile(configFileOrDefault, contents, 0644); err != nil {
 		return fmt.Errorf("writing config file: %w", err)
 	}
 	return nil
+}
+
+func UpdateUserSurveyTaken(configFile string, id string) error {
+	ai := fmt.Sprintf(updateUserTaken, id)
+	aiErr := fmt.Errorf("could not automatically update the survey prompted timestamp - please run `%s`", ai)
+	configFile, err := ResolveConfigFile(configFile)
+	if err != nil {
+		return aiErr
+	}
+	fullConfig, err := ReadConfigFile(configFile)
+	if err != nil {
+		return aiErr
+	}
+	if fullConfig.Global == nil {
+		fullConfig.Global = &ContextConfig{}
+	}
+	if fullConfig.Global.Survey == nil {
+		fullConfig.Global.Survey = &SurveyConfig{}
+	}
+	fullConfig.Global.Survey.UserSurveys = updatedUserSurveys(fullConfig.Global.Survey.UserSurveys, id)
+	err = WriteFullConfig(configFile, fullConfig)
+	if err != nil {
+		return aiErr
+	}
+	return nil
+}
+
+func updatedUserSurveys(us []*UserSurvey, id string) []*UserSurvey {
+	for _, s := range us {
+		if s.ID == id {
+			s.Taken = util.Ptr(true)
+			return us
+		}
+	}
+	return append(us, &UserSurvey{ID: id, Taken: util.Ptr(true)})
 }

@@ -27,11 +27,10 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/sirupsen/logrus"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/filemon"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/filemon"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 var syncLists = map[projectKey]SyncMap{}
@@ -72,7 +71,7 @@ func getSyncDiff(ctx context.Context, workspace string, a *latest.JibArtifact, e
 	// no deletions allowed
 	if len(e.Deleted) != 0 {
 		// change into logging
-		logrus.Debug("Deletions are not supported by jib auto sync at the moment")
+		log.Entry(ctx).Debug("Deletions are not supported by jib auto sync at the moment")
 		return nil, nil, nil
 	}
 
@@ -161,7 +160,7 @@ func getSyncMap(ctx context.Context, workspace string, artifact *latest.JibArtif
 		return nil, fmt.Errorf("failed to get sync command: %w", err)
 	}
 
-	sm, err := getSyncMapFromSystem(cmd)
+	sm, err := getSyncMapFromSystem(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("failed to obtain sync map from jib builder: %w", err)
 	}
@@ -169,7 +168,7 @@ func getSyncMap(ctx context.Context, workspace string, artifact *latest.JibArtif
 }
 
 func getSyncMapCommand(ctx context.Context, workspace string, artifact *latest.JibArtifact) (*exec.Cmd, error) {
-	t, err := DeterminePluginType(workspace, artifact)
+	t, err := DeterminePluginType(ctx, workspace, artifact)
 	if err != nil {
 		return nil, err
 	}
@@ -184,9 +183,9 @@ func getSyncMapCommand(ctx context.Context, workspace string, artifact *latest.J
 	}
 }
 
-func getSyncMapFromSystem(cmd *exec.Cmd) (*SyncMap, error) {
+func getSyncMapFromSystem(ctx context.Context, cmd *exec.Cmd) (*SyncMap, error) {
 	jsm := JSONSyncMap{}
-	stdout, err := util.RunCmdOut(cmd)
+	stdout, err := util.RunCmdOut(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Jib sync map: %w", err)
 	}

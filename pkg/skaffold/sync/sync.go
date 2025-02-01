@@ -20,25 +20,29 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/bmatcuk/doublestar"
-	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/buildpacks"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/jib"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/filemon"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/buildpacks"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/jib"
+	kosync "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/ko/sync"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/filemon"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/hooks"
+	kubernetesclient "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/client"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 // For testing
@@ -48,8 +52,13 @@ var (
 	SyncMap    = syncMapForArtifact
 )
 
-func NewItem(ctx context.Context, a *latest.Artifact, e filemon.Events, builds []build.Artifact, insecureRegistries map[string]bool) (*Item, error) {
+func NewItem(ctx context.Context, a *latest.Artifact, e filemon.Events, builds []graph.Artifact, cfg docker.Config, dependentArtifactsCount int) (*Item, error) {
 	if !e.HasChanged() || a.Sync == nil {
+		return nil, nil
+	}
+
+	if dependentArtifactsCount > 0 {
+		log.Entry(ctx).Warnf("Ignoring sync rules for image %q as it is being used as a required artifact for other images.", a.ImageName)
 		return nil, nil
 	}
 
@@ -60,31 +69,31 @@ func NewItem(ctx context.Context, a *latest.Artifact, e filemon.Events, builds [
 
 	switch {
 	case len(a.Sync.Manual) > 0:
-		return syncItem(a, tag, e, a.Sync.Manual, insecureRegistries)
+		return syncItem(ctx, a, tag, e, a.Sync.Manual, cfg)
 
 	case a.Sync.Auto != nil:
-		return autoSyncItem(ctx, a, tag, e, insecureRegistries)
+		return autoSyncItem(ctx, a, tag, e, cfg)
 
 	case len(a.Sync.Infer) > 0:
-		return inferredSyncItem(a, tag, e, insecureRegistries)
+		return inferredSyncItem(ctx, a, tag, e, cfg)
 
 	default:
 		return nil, nil
 	}
 }
 
-func syncItem(a *latest.Artifact, tag string, e filemon.Events, syncRules []*latest.SyncRule, insecureRegistries map[string]bool) (*Item, error) {
-	containerWd, err := WorkingDir(tag, insecureRegistries)
+func syncItem(ctx context.Context, a *latest.Artifact, tag string, e filemon.Events, syncRules []*latest.SyncRule, cfg docker.Config) (*Item, error) {
+	containerWd, err := WorkingDir(ctx, tag, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("retrieving working dir for %q: %w", tag, err)
 	}
 
-	toCopy, err := intersect(a.Workspace, containerWd, syncRules, append(e.Added, e.Modified...))
+	toCopy, err := intersect(ctx, a.Workspace, containerWd, syncRules, append(e.Added, e.Modified...))
 	if err != nil {
 		return nil, fmt.Errorf("intersecting sync map and added, modified files: %w", err)
 	}
 
-	toDelete, err := intersect(a.Workspace, containerWd, syncRules, e.Deleted)
+	toDelete, err := intersect(ctx, a.Workspace, containerWd, syncRules, e.Deleted)
 	if err != nil {
 		return nil, fmt.Errorf("intersecting sync map and deleted files: %w", err)
 	}
@@ -94,16 +103,31 @@ func syncItem(a *latest.Artifact, tag string, e filemon.Events, syncRules []*lat
 		return nil, nil
 	}
 
-	return &Item{Image: tag, Copy: toCopy, Delete: toDelete}, nil
+	return &Item{Image: tag, Artifact: a, Copy: toCopy, Delete: toDelete}, nil
 }
 
-func inferredSyncItem(a *latest.Artifact, tag string, e filemon.Events, insecureRegistries map[string]bool) (*Item, error) {
+func inferredSyncItem(ctx context.Context, a *latest.Artifact, tag string, e filemon.Events, cfg docker.Config) (*Item, error) {
+	// the ko builder doesn't need or use a sync map
+	if a.KoArtifact != nil {
+		log.Entry(ctx).Debugf("ko inferred sync %+v", e)
+		toCopy, toDelete, err := kosync.Infer(ctx, a, e)
+		if err != nil {
+			return nil, err
+		}
+		return &Item{
+			Image:    tag,
+			Artifact: a,
+			Copy:     toCopy,
+			Delete:   toDelete,
+		}, nil
+	}
+
 	// deleted files are no longer contained in the syncMap, so we need to rebuild
 	if len(e.Deleted) > 0 {
 		return nil, nil
 	}
 
-	syncMap, err := SyncMap(a, insecureRegistries)
+	syncMap, err := SyncMap(ctx, a, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("inferring syncmap for image %q: %w", a.ImageName, err)
 	}
@@ -126,41 +150,44 @@ func inferredSyncItem(a *latest.Artifact, tag string, e filemon.Events, insecure
 			}
 		}
 		if !matches {
-			logrus.Infof("Changed file %s does not match any sync pattern. Skipping sync", relPath)
+			log.Entry(ctx).Infof("Changed file %s does not match any sync pattern. Skipping sync", relPath)
 			return nil, nil
 		}
 
 		if dsts, ok := syncMap[relPath]; ok {
 			toCopy[f] = dsts
 		} else {
-			logrus.Infof("Changed file %s is not syncable. Skipping sync", relPath)
+			log.Entry(ctx).Infof("Changed file %s is not syncable. Skipping sync", relPath)
 			return nil, nil
 		}
 	}
 
-	return &Item{Image: tag, Copy: toCopy}, nil
+	return &Item{Image: tag, Artifact: a, Copy: toCopy}, nil
 }
 
-func syncMapForArtifact(a *latest.Artifact, insecureRegistries map[string]bool) (map[string][]string, error) {
+func syncMapForArtifact(ctx context.Context, a *latest.Artifact, cfg docker.Config) (map[string][]string, error) {
 	switch {
 	case a.DockerArtifact != nil:
-		return docker.SyncMap(a.Workspace, a.DockerArtifact.DockerfilePath, a.DockerArtifact.BuildArgs, insecureRegistries)
+		return docker.SyncMap(ctx, a.Workspace, a.DockerArtifact.DockerfilePath, a.DockerArtifact.BuildArgs, cfg)
 
-	case a.CustomArtifact != nil && a.CustomArtifact.Dependencies != nil && a.CustomArtifact.Dependencies.Dockerfile != nil:
-		return docker.SyncMap(a.Workspace, a.CustomArtifact.Dependencies.Dockerfile.Path, a.CustomArtifact.Dependencies.Dockerfile.BuildArgs, insecureRegistries)
+	case a.CustomArtifact != nil:
+		if a.CustomArtifact.Dependencies == nil || a.CustomArtifact.Dependencies.Dockerfile == nil {
+			return nil, build.ErrCustomBuildNoDockerfile{}
+		}
+		return docker.SyncMap(ctx, a.Workspace, a.CustomArtifact.Dependencies.Dockerfile.Path, a.CustomArtifact.Dependencies.Dockerfile.BuildArgs, cfg)
 
 	case a.KanikoArtifact != nil:
-		return docker.SyncMap(a.Workspace, a.KanikoArtifact.DockerfilePath, a.KanikoArtifact.BuildArgs, insecureRegistries)
+		return docker.SyncMap(ctx, a.Workspace, a.KanikoArtifact.DockerfilePath, a.KanikoArtifact.BuildArgs, cfg)
 
 	default:
 		return nil, build.ErrSyncMapNotSupported{}
 	}
 }
 
-func autoSyncItem(ctx context.Context, a *latest.Artifact, tag string, e filemon.Events, insecureRegistries map[string]bool) (*Item, error) {
+func autoSyncItem(ctx context.Context, a *latest.Artifact, tag string, e filemon.Events, cfg docker.Config) (*Item, error) {
 	switch {
 	case a.BuildpackArtifact != nil:
-		labels, err := Labels(tag, insecureRegistries)
+		labels, err := Labels(ctx, tag, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("retrieving labels for %q: %w", tag, err)
 		}
@@ -170,7 +197,7 @@ func autoSyncItem(ctx context.Context, a *latest.Artifact, tag string, e filemon
 			return nil, fmt.Errorf("extracting sync rules from labels for %q: %w", tag, err)
 		}
 
-		return syncItem(a, tag, e, rules, insecureRegistries)
+		return syncItem(ctx, a, tag, e, rules, cfg)
 
 	case a.JibArtifact != nil:
 		toCopy, toDelete, err := jib.GetSyncDiff(ctx, a.Workspace, a.JibArtifact, e)
@@ -181,7 +208,7 @@ func autoSyncItem(ctx context.Context, a *latest.Artifact, tag string, e filemon
 			// do a rebuild
 			return nil, nil
 		}
-		return &Item{Image: tag, Copy: toCopy, Delete: toDelete}, nil
+		return &Item{Image: tag, Artifact: a, Copy: toCopy, Delete: toDelete}, nil
 
 	default:
 		// TODO: this error does appear a little late in the build, perhaps it could surface at first run, rather than first sync?
@@ -189,7 +216,7 @@ func autoSyncItem(ctx context.Context, a *latest.Artifact, tag string, e filemon
 	}
 }
 
-func latestTag(image string, builds []build.Artifact) string {
+func latestTag(image string, builds []graph.Artifact) string {
 	for _, build := range builds {
 		if build.ImageName == image {
 			return build.Tag
@@ -198,7 +225,7 @@ func latestTag(image string, builds []build.Artifact) string {
 	return ""
 }
 
-func intersect(contextWd, containerWd string, syncRules []*latest.SyncRule, files []string) (syncMap, error) {
+func intersect(ctx context.Context, contextWd, containerWd string, syncRules []*latest.SyncRule, files []string) (syncMap, error) {
 	ret := make(syncMap)
 	for _, f := range files {
 		relPath, err := filepath.Rel(contextWd, f)
@@ -212,7 +239,7 @@ func intersect(contextWd, containerWd string, syncRules []*latest.SyncRule, file
 		}
 
 		if len(dsts) == 0 {
-			logrus.Infof("Changed file %s does not match any sync pattern. Skipping sync", relPath)
+			log.Entry(ctx).Infof("Changed file %s does not match any sync pattern. Skipping sync", relPath)
 			return nil, nil
 		}
 
@@ -246,19 +273,49 @@ func matchSyncRules(syncRules []*latest.SyncRule, relPath, containerWd string) (
 	return dsts, nil
 }
 
-func (s *podSyncer) Sync(ctx context.Context, item *Item) error {
-	if len(item.Copy) > 0 {
-		logrus.Infoln("Copying files:", item.Copy, "to", item.Image)
+func (s *PodSyncer) Sync(ctx context.Context, out io.Writer, item *Item) error {
+	if !item.HasChanges() {
+		return nil
+	}
 
-		if err := Perform(ctx, item.Image, item.Copy, s.copyFileFn, s.namespaces); err != nil {
+	var copy, delete []string
+	for k := range item.Copy {
+		copy = append(copy, k)
+	}
+	for k := range item.Delete {
+		delete = append(delete, k)
+	}
+
+	opts, err := hooks.NewSyncEnvOpts(item.Artifact, item.Image, copy, delete, *s.namespaces, s.kubectl.KubeContext)
+	if err != nil {
+		return err
+	}
+	hooksRunner := hooks.NewSyncRunner(s.kubectl, item.Artifact.ImageName, item.Image, *s.namespaces, s.formatter, item.Artifact.Sync.LifecycleHooks, opts)
+	if err := hooksRunner.RunPreHooks(ctx, out); err != nil {
+		return fmt.Errorf("pre-sync hooks failed for artifact %q: %w", item.Artifact.ImageName, err)
+	}
+	if err := s.sync(ctx, item); err != nil {
+		return err
+	}
+	if err := hooksRunner.RunPostHooks(ctx, out); err != nil {
+		return fmt.Errorf("post-sync hooks failed for artifact %q: %w", item.Artifact.ImageName, err)
+	}
+	return nil
+}
+
+func (s *PodSyncer) sync(ctx context.Context, item *Item) error {
+	if len(item.Copy) > 0 {
+		log.Entry(ctx).Info("Copying files:", item.Copy, "to", item.Image)
+
+		if err := Perform(ctx, item.Image, item.Copy, s.copyFileFn, *s.namespaces, s.kubectl.KubeContext); err != nil {
 			return fmt.Errorf("copying files: %w", err)
 		}
 	}
 
 	if len(item.Delete) > 0 {
-		logrus.Infoln("Deleting files:", item.Delete, "from", item.Image)
+		log.Entry(ctx).Info("Deleting files:", item.Delete, "from", item.Image)
 
-		if err := Perform(ctx, item.Image, item.Delete, s.deleteFileFn, s.namespaces); err != nil {
+		if err := Perform(ctx, item.Image, item.Delete, s.deleteFileFn, *s.namespaces, s.kubectl.KubeContext); err != nil {
 			return fmt.Errorf("deleting files: %w", err)
 		}
 	}
@@ -266,30 +323,34 @@ func (s *podSyncer) Sync(ctx context.Context, item *Item) error {
 	return nil
 }
 
-func Perform(ctx context.Context, image string, files syncMap, cmdFn func(context.Context, v1.Pod, v1.Container, syncMap) *exec.Cmd, namespaces []string) error {
+func Perform(ctx context.Context, image string, files syncMap, cmdFn func(context.Context, v1.Pod, v1.Container, syncMap) *exec.Cmd, namespaces []string, kubeContext string) error {
 	if len(files) == 0 {
 		return nil
 	}
 
 	errs, ctx := errgroup.WithContext(ctx)
 
-	client, err := kubernetes.Client()
+	client, err := kubernetesclient.Client(kubeContext)
 	if err != nil {
 		return fmt.Errorf("getting Kubernetes client: %w", err)
 	}
 
 	numSynced := 0
 	for _, ns := range namespaces {
-		pods, err := client.CoreV1().Pods(ns).List(metav1.ListOptions{})
+		pods, err := client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
+			FieldSelector: fmt.Sprintf("status.phase=%s", v1.PodRunning),
+		})
+
 		if err != nil {
 			return fmt.Errorf("getting pods for namespace %q: %w", ns, err)
 		}
 
-		for _, p := range pods.Items {
-			if p.Status.Phase != v1.PodRunning {
-				continue
-			}
+		if len(pods.Items) == 0 {
+			log.Entry(ctx).Warnf("no running pods found in namespace %q", ns)
+			continue
+		}
 
+		for _, p := range pods.Items {
 			for _, c := range p.Spec.Containers {
 				if c.Image != image {
 					continue
@@ -297,7 +358,7 @@ func Perform(ctx context.Context, image string, files syncMap, cmdFn func(contex
 
 				cmd := cmdFn(ctx, p, c, files)
 				errs.Go(func() error {
-					_, err := util.RunCmdOut(cmd)
+					_, err := util.RunCmdOut(ctx, cmd)
 					return err
 				})
 				numSynced++
@@ -310,6 +371,7 @@ func Perform(ctx context.Context, image string, files syncMap, cmdFn func(contex
 	}
 
 	if numSynced == 0 {
+		log.Entry(ctx).Warnf("sync failed for artifact %q", image)
 		return errors.New("didn't sync any files")
 	}
 	return nil

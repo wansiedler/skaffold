@@ -18,21 +18,23 @@ package build
 
 import (
 	"context"
+	"strings"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
 )
 
 // MergeWithPreviousBuilds merges previous or prebuilt build artifacts with
 // builds. If an artifact is already present in builds, the same artifact from
 // previous will be replaced at the same position.
-func MergeWithPreviousBuilds(builds, previous []Artifact) []Artifact {
-	updatedBuilds := map[string]Artifact{}
+func MergeWithPreviousBuilds(builds, previous []graph.Artifact) []graph.Artifact {
+	updatedBuilds := map[string]graph.Artifact{}
 	for _, build := range builds {
 		updatedBuilds[build.ImageName] = build
 	}
 
 	added := map[string]bool{}
-	var merged []Artifact
+	var merged []graph.Artifact
 
 	for _, artifact := range previous {
 		if updated, found := updatedBuilds[artifact.ImageName]; found {
@@ -53,7 +55,11 @@ func MergeWithPreviousBuilds(builds, previous []Artifact) []Artifact {
 }
 
 func TagWithDigest(tag, digest string) string {
-	return tag + "@" + digest
+	digestSuffix := "@" + digest
+	if strings.HasSuffix(tag, digestSuffix) {
+		return tag
+	}
+	return tag + digestSuffix
 }
 
 func TagWithImageID(ctx context.Context, tag string, imageID string, localDocker docker.LocalDaemon) (string, error) {

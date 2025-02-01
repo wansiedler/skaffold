@@ -18,15 +18,22 @@ package jib
 
 import (
 	"context"
-	"fmt"
 	"io"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/instrumentation"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
 )
 
 // Build builds an artifact with Jib.
-func (b *Builder) Build(ctx context.Context, out io.Writer, artifact *latest.Artifact, tag string) (string, error) {
-	t, err := DeterminePluginType(artifact.Workspace, artifact.JibArtifact)
+func (b *Builder) Build(ctx context.Context, out io.Writer, artifact *latest.Artifact, tag string, platforms platform.Matcher) (string, error) {
+	instrumentation.AddAttributesToCurrentSpanFromContext(ctx, map[string]string{
+		"BuildType":   "jib",
+		"Context":     instrumentation.PII(artifact.Workspace),
+		"Destination": instrumentation.PII(tag),
+	})
+
+	t, err := DeterminePluginType(ctx, artifact.Workspace, artifact.JibArtifact)
 	if err != nil {
 		return "", err
 	}
@@ -34,17 +41,19 @@ func (b *Builder) Build(ctx context.Context, out io.Writer, artifact *latest.Art
 	switch t {
 	case JibMaven:
 		if b.pushImages {
-			return b.buildJibMavenToRegistry(ctx, out, artifact.Workspace, artifact.JibArtifact, tag)
+			return b.buildJibMavenToRegistry(ctx, out, artifact.Workspace, artifact.JibArtifact, artifact.Dependencies, tag, platforms)
 		}
-		return b.buildJibMavenToDocker(ctx, out, artifact.Workspace, artifact.JibArtifact, tag)
+		return b.buildJibMavenToDocker(ctx, out, artifact.Workspace, artifact.JibArtifact, artifact.Dependencies, tag, platforms)
 
 	case JibGradle:
 		if b.pushImages {
-			return b.buildJibGradleToRegistry(ctx, out, artifact.Workspace, artifact.JibArtifact, tag)
+			return b.buildJibGradleToRegistry(ctx, out, artifact.Workspace, artifact.JibArtifact, artifact.Dependencies, tag, platforms)
 		}
-		return b.buildJibGradleToDocker(ctx, out, artifact.Workspace, artifact.JibArtifact, tag)
+		return b.buildJibGradleToDocker(ctx, out, artifact.Workspace, artifact.JibArtifact, artifact.Dependencies, tag, platforms)
 
 	default:
-		return "", fmt.Errorf("unable to determine Jib builder type for %s", artifact.Workspace)
+		return "", unknownPluginType(artifact.Workspace)
 	}
 }
+
+func (b *Builder) SupportedPlatforms() platform.Matcher { return platform.All }

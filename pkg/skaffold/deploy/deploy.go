@@ -20,47 +20,50 @@ import (
 	"context"
 	"io"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/access"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/debug"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/manifest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/status"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/sync"
 )
 
 // Deployer is the Deploy API of skaffold and responsible for deploying
 // the build results to a Kubernetes cluster
 type Deployer interface {
-	Labels() map[string]string
-
 	// Deploy should ensure that the build results are deployed to the Kubernetes
 	// cluster.
-	Deploy(context.Context, io.Writer, []build.Artifact, []Labeller) *Result
+	Deploy(context.Context, io.Writer, []graph.Artifact, manifest.ManifestListByConfig) error
 
 	// Dependencies returns a list of files that the deployer depends on.
 	// In dev mode, a redeploy will be triggered
 	Dependencies() ([]string, error)
 
 	// Cleanup deletes what was deployed by calling Deploy.
-	Cleanup(context.Context, io.Writer) error
+	Cleanup(context.Context, io.Writer, bool, manifest.ManifestListByConfig) error
 
-	// Render generates the Kubernetes manifests replacing the build results and
-	// writes them to the given file path
-	Render(context.Context, io.Writer, []build.Artifact, []Labeller, bool, string) error
-}
+	// GetDebugger returns a Deployer's implementation of a Debugger
+	GetDebugger() debug.Debugger
 
-type Result struct {
-	err        error
-	namespaces []string
-}
+	// GetLogger returns a Deployer's implementation of a Logger
+	GetLogger() log.Logger
 
-func NewDeployErrorResult(err error) *Result {
-	return &Result{err: err}
-}
+	// GetAccessor returns a Deployer's implementation of an Accessor
+	GetAccessor() access.Accessor
 
-func NewDeploySuccessResult(namespaces []string) *Result {
-	return &Result{namespaces: namespaces}
-}
+	// GetSyncer returns a Deployer's implementation of a Syncer
+	GetSyncer() sync.Syncer
 
-func (d *Result) Namespaces() []string {
-	return d.namespaces
-}
+	// TrackBuildArtifacts registers build artifacts to be tracked by a Deployer
+	TrackBuildArtifacts(builds, deployedImages []graph.Artifact)
 
-func (d *Result) GetError() error {
-	return d.err
+	// RegisterLocalImages tracks all local images to be loaded by the Deployer
+	RegisterLocalImages([]graph.Artifact)
+
+	// GetStatusMonitor returns a Deployer's implementation of a StatusMonitor
+	GetStatusMonitor() status.Monitor
+
+	// Returns the unique name of the config yaml file related with the Deployer
+	ConfigName() string
 }

@@ -21,35 +21,54 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/custom"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/misc"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/tag"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/custom"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/misc"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/constants"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 // Build builds a list of artifacts with Kaniko.
-func (b *Builder) Build(ctx context.Context, out io.Writer, tags tag.ImageTags, artifacts []*latest.Artifact) ([]build.Artifact, error) {
-	teardownPullSecret, err := b.setupPullSecret(out)
-	if err != nil {
-		return nil, fmt.Errorf("setting up pull secret: %w", err)
-	}
-	defer teardownPullSecret()
-
-	if b.DockerConfig != nil {
-		teardownDockerConfigSecret, err := b.setupDockerConfigSecret(out)
-		if err != nil {
-			return nil, fmt.Errorf("setting up docker config secret: %w", err)
-		}
-		defer teardownDockerConfigSecret()
-	}
-
-	return build.InParallel(ctx, out, tags, artifacts, b.buildArtifact, b.ClusterDetails.Concurrency)
+func (b *Builder) Build(ctx context.Context, out io.Writer, artifact *latest.Artifact) build.ArtifactBuilder {
+	builder := build.WithLogFile(b.buildArtifact, b.cfg.Muted())
+	return builder
 }
 
-func (b *Builder) buildArtifact(ctx context.Context, out io.Writer, artifact *latest.Artifact, tag string) (string, error) {
-	digest, err := b.runBuildForArtifact(ctx, out, artifact, tag)
+func (b *Builder) PreBuild(ctx context.Context, out io.Writer) error {
+	teardownPullSecret, err := b.setupPullSecret(ctx, out)
+	if err != nil {
+		return fmt.Errorf("setting up pull secret: %w", err)
+	}
+	b.teardownFunc = append(b.teardownFunc, teardownPullSecret)
+
+	if b.DockerConfig != nil {
+		teardownDockerConfigSecret, err := b.setupDockerConfigSecret(ctx, out)
+		if err != nil {
+			return fmt.Errorf("setting up docker config secret: %w", err)
+		}
+		b.teardownFunc = append(b.teardownFunc, teardownDockerConfigSecret)
+	}
+	return nil
+}
+
+func (b *Builder) PostBuild(_ context.Context, _ io.Writer) error {
+	for _, f := range b.teardownFunc {
+		f()
+	}
+	return nil
+}
+
+func (b *Builder) buildArtifact(ctx context.Context, out io.Writer, artifact *latest.Artifact, tag string, m platform.Matcher) (string, error) {
+	// TODO: Implement building multiplatform images for cluster builder
+	if m.IsMultiPlatform() {
+		log.Entry(ctx).Println("skaffold doesn't yet support multi platform builds for the cluster builder")
+	}
+
+	digest, err := b.runBuildForArtifact(ctx, out, artifact, tag, m)
 	if err != nil {
 		return "", err
 	}
@@ -57,13 +76,19 @@ func (b *Builder) buildArtifact(ctx context.Context, out io.Writer, artifact *la
 	return build.TagWithDigest(tag, digest), nil
 }
 
-func (b *Builder) runBuildForArtifact(ctx context.Context, out io.Writer, a *latest.Artifact, tag string) (string, error) {
+func (b *Builder) Concurrency() *int {
+	return util.Ptr(b.ClusterDetails.Concurrency)
+}
+
+func (b *Builder) runBuildForArtifact(ctx context.Context, out io.Writer, a *latest.Artifact, tag string, platforms platform.Matcher) (string, error) {
+	// required artifacts as build-args
+	requiredImages := docker.ResolveDependencyImages(a.Dependencies, b.artifactStore, true)
 	switch {
 	case a.KanikoArtifact != nil:
-		return b.buildWithKaniko(ctx, out, a.Workspace, a.KanikoArtifact, tag)
+		return b.buildWithKaniko(ctx, out, a.Workspace, a.ImageName, a.KanikoArtifact, tag, requiredImages, platforms)
 
 	case a.CustomArtifact != nil:
-		return custom.NewArtifactBuilder(nil, b.insecureRegistries, true, b.retrieveExtraEnv()).Build(ctx, out, a, tag)
+		return custom.NewArtifactBuilder(nil, b.cfg, true, b.skipTests, append(b.retrieveExtraEnv(), util.EnvPtrMapToSlice(requiredImages, "=")...)).Build(ctx, out, a, tag, platforms)
 
 	default:
 		return "", fmt.Errorf("unexpected type %q for in-cluster artifact:\n%s", misc.ArtifactType(a), misc.FormatArtifact(a))
@@ -72,7 +97,7 @@ func (b *Builder) runBuildForArtifact(ctx context.Context, out io.Writer, a *lat
 
 func (b *Builder) retrieveExtraEnv() []string {
 	env := []string{
-		fmt.Sprintf("%s=%s", constants.KubeContext, b.kubeContext),
+		fmt.Sprintf("%s=%s", constants.KubeContext, b.cfg.GetKubeContext()),
 		fmt.Sprintf("%s=%s", constants.Namespace, b.ClusterDetails.Namespace),
 		fmt.Sprintf("%s=%s", constants.PullSecretName, b.ClusterDetails.PullSecretName),
 		fmt.Sprintf("%s=%s", constants.Timeout, b.ClusterDetails.Timeout),

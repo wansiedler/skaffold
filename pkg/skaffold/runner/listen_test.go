@@ -17,12 +17,14 @@ limitations under the License.
 package runner
 
 import (
+	"context"
 	"errors"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/filemon"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/trigger"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/filemon"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/trigger"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 // errMonitor is a filemon.Monitor that always fail to run.
@@ -51,10 +53,23 @@ func (f *fakeTriggger) Debounce() bool {
 	return false
 }
 
+type fakeDepsResolver struct{}
+
+func (f *fakeDepsResolver) TransitiveArtifactDependencies(context.Context, *latest.Artifact) ([]string, error) {
+	return nil, nil
+}
+
+func (f *fakeDepsResolver) SingleArtifactDependencies(context.Context, *latest.Artifact, string) ([]string, error) {
+	return nil, nil
+}
+
+func (f *fakeDepsResolver) Reset() {}
+
 func TestSkipDevLoopOnMonitorError(t *testing.T) {
 	listener := &SkaffoldListener{
-		Monitor: &errMonitor{},
-		Trigger: &fakeTriggger{},
+		Monitor:                 &errMonitor{},
+		Trigger:                 &fakeTriggger{},
+		sourceDependenciesCache: &fakeDepsResolver{},
 	}
 
 	var devLoopWasCalled bool
@@ -68,8 +83,9 @@ func TestSkipDevLoopOnMonitorError(t *testing.T) {
 
 func TestContinueOnDevLoopError(t *testing.T) {
 	listener := &SkaffoldListener{
-		Monitor: &fakeMonitor{},
-		Trigger: &fakeTriggger{},
+		Monitor:                 &fakeMonitor{},
+		Trigger:                 &fakeTriggger{},
+		sourceDependenciesCache: &fakeDepsResolver{},
 	}
 
 	err := listener.do(func() error {
@@ -81,8 +97,9 @@ func TestContinueOnDevLoopError(t *testing.T) {
 
 func TestReportDevLoopError(t *testing.T) {
 	listener := &SkaffoldListener{
-		Monitor: &fakeMonitor{},
-		Trigger: &fakeTriggger{},
+		Monitor:                 &fakeMonitor{},
+		Trigger:                 &fakeTriggger{},
+		sourceDependenciesCache: &fakeDepsResolver{},
 	}
 
 	err := listener.do(func() error {

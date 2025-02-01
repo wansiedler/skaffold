@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Skaffold Authors
+Copyright 2021 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,18 +19,20 @@ package runner
 import (
 	"context"
 	"errors"
-	"io/ioutil"
+	"io"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	k8s "k8s.io/client-go/kubernetes"
 	fakekubeclientset "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/clientcmd/api"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/filemon"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/sync"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/filemon"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/client"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/sync"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 type NoopMonitor struct{}
@@ -63,12 +65,16 @@ type TestMonitor struct {
 	testBench *TestBench
 }
 
-func (t *TestMonitor) Register(deps func() ([]string, error), onChange func(filemon.Events)) error {
+func (t *TestMonitor) Register(_ func() ([]string, error), onChange func(filemon.Events)) error {
 	t.callbacks = append(t.callbacks, onChange)
 	return nil
 }
 
 func (t *TestMonitor) Run(bool) error {
+	if t.testBench.intentTrigger {
+		return nil
+	}
+
 	evt := t.events[t.testBench.currentCycle]
 
 	for _, file := range evt.Modified {
@@ -77,8 +83,9 @@ func (t *TestMonitor) Run(bool) error {
 			t.callbacks[0](evt) // 1st artifact changed
 		case "file2":
 			t.callbacks[1](evt) // 2nd artifact changed
+		// callbacks[2] and callbacks[3] are for `test` dependency triggers
 		case "manifest.yaml":
-			t.callbacks[3](evt) // deployment configuration changed
+			t.callbacks[4](evt) // deployment configuration changed
 		}
 	}
 
@@ -87,7 +94,7 @@ func (t *TestMonitor) Run(bool) error {
 
 func (t *TestMonitor) Reset() {}
 
-func mockK8sClient() (k8s.Interface, error) {
+func mockK8sClient(string) (k8s.Interface, error) {
 	return fakekubeclientset.NewSimpleClientset(), nil
 }
 
@@ -113,12 +120,22 @@ func TestDevFailFirstCycle(t *testing.T) {
 			}},
 		},
 		{
-			description: "fails to deploy the first time",
-			testBench:   &TestBench{deployErrors: []error{errors.New("")}},
+			description: "fails to render the first time",
+			testBench:   &TestBench{renderErrors: []error{errors.New("")}},
 			monitor:     &NoopMonitor{},
 			expectedActions: []Actions{{
 				Built:  []string{"img:1"},
 				Tested: []string{"img:1"},
+			}},
+		},
+		{
+			description: "fails to deploy the first time",
+			testBench:   &TestBench{deployErrors: []error{errors.New("")}},
+			monitor:     &NoopMonitor{},
+			expectedActions: []Actions{{
+				Built:    []string{"img:1"},
+				Tested:   []string{"img:1"},
+				Rendered: []string{"img:1"},
 			}},
 		},
 		{
@@ -128,6 +145,7 @@ func TestDevFailFirstCycle(t *testing.T) {
 			expectedActions: []Actions{{
 				Built:    []string{"img:1"},
 				Tested:   []string{"img:1"},
+				Rendered: []string{"img:1"},
 				Deployed: []string{"img:1"},
 			}},
 		},
@@ -135,15 +153,14 @@ func TestDevFailFirstCycle(t *testing.T) {
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			t.SetupFakeKubernetesContext(api.Config{CurrentContext: "cluster1"})
-			t.Override(&kubernetes.Client, mockK8sClient)
-
-			// runner := createRunner(t, test.testBench).WithMonitor(test.monitor)
-			runner := createRunner(t, test.testBench, test.monitor)
+			t.Override(&client.Client, mockK8sClient)
+			artifacts := []*latest.Artifact{{
+				ImageName: "img",
+			}}
+			r := createRunner(t, test.testBench, test.monitor, artifacts, nil)
 			test.testBench.firstMonitor = test.monitor.Run
 
-			err := runner.Dev(context.Background(), ioutil.Discard, []*latest.Artifact{{
-				ImageName: "img",
-			}})
+			err := r.Dev(context.Background(), io.Discard, artifacts)
 
 			t.CheckErrorAndDeepEqual(true, err, test.expectedActions, test.testBench.Actions())
 		})
@@ -167,6 +184,7 @@ func TestDev(t *testing.T) {
 				{
 					Built:    []string{"img1:1", "img2:1"},
 					Tested:   []string{"img1:1", "img2:1"},
+					Rendered: []string{"img1:1", "img2:1"},
 					Deployed: []string{"img1:1", "img2:1"},
 				},
 				{},
@@ -182,10 +200,30 @@ func TestDev(t *testing.T) {
 				{
 					Built:    []string{"img1:1", "img2:1"},
 					Tested:   []string{"img1:1", "img2:1"},
+					Rendered: []string{"img1:1", "img2:1"},
 					Deployed: []string{"img1:1", "img2:1"},
 				},
 				{
 					Built: []string{"img1:2", "img2:2"},
+				},
+			},
+		},
+		{
+			description: "ignore subsequent render errors",
+			testBench:   &TestBench{renderErrors: []error{nil, errors.New("")}},
+			watchEvents: []filemon.Events{
+				{Modified: []string{"file1", "file2"}},
+			},
+			expectedActions: []Actions{
+				{
+					Built:    []string{"img1:1", "img2:1"},
+					Tested:   []string{"img1:1", "img2:1"},
+					Rendered: []string{"img1:1", "img2:1"},
+					Deployed: []string{"img1:1", "img2:1"},
+				},
+				{
+					Built:  []string{"img1:2", "img2:2"},
+					Tested: []string{"img1:2", "img2:2"},
 				},
 			},
 		},
@@ -199,11 +237,13 @@ func TestDev(t *testing.T) {
 				{
 					Built:    []string{"img1:1", "img2:1"},
 					Tested:   []string{"img1:1", "img2:1"},
+					Rendered: []string{"img1:1", "img2:1"},
 					Deployed: []string{"img1:1", "img2:1"},
 				},
 				{
-					Built:  []string{"img1:2", "img2:2"},
-					Tested: []string{"img1:2", "img2:2"},
+					Built:    []string{"img1:2", "img2:2"},
+					Tested:   []string{"img1:2", "img2:2"},
+					Rendered: []string{"img1:2", "img2:2"},
 				},
 			},
 		},
@@ -217,11 +257,13 @@ func TestDev(t *testing.T) {
 				{
 					Built:    []string{"img1:1", "img2:1"},
 					Tested:   []string{"img1:1", "img2:1"},
+					Rendered: []string{"img1:1", "img2:1"},
 					Deployed: []string{"img1:1", "img2:1"},
 				},
 				{
 					Built:    []string{"img1:2", "img2:2"},
 					Tested:   []string{"img1:2", "img2:2"},
+					Rendered: []string{"img1:2", "img2:2"},
 					Deployed: []string{"img1:2", "img2:2"},
 				},
 			},
@@ -236,11 +278,13 @@ func TestDev(t *testing.T) {
 				{
 					Built:    []string{"img1:1", "img2:1"},
 					Tested:   []string{"img1:1", "img2:1"},
+					Rendered: []string{"img1:1", "img2:1"},
 					Deployed: []string{"img1:1", "img2:1"},
 				},
 				{
 					Built:    []string{"img2:2"},
 					Tested:   []string{"img2:2"},
+					Rendered: []string{"img1:1", "img2:2"},
 					Deployed: []string{"img1:1", "img2:2"},
 				},
 			},
@@ -255,9 +299,11 @@ func TestDev(t *testing.T) {
 				{
 					Built:    []string{"img1:1", "img2:1"},
 					Tested:   []string{"img1:1", "img2:1"},
+					Rendered: []string{"img1:1", "img2:1"},
 					Deployed: []string{"img1:1", "img2:1"},
 				},
 				{
+					Rendered: []string{"img1:1", "img2:1"},
 					Deployed: []string{"img1:1", "img2:1"},
 				},
 			},
@@ -266,21 +312,184 @@ func TestDev(t *testing.T) {
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			t.SetupFakeKubernetesContext(api.Config{CurrentContext: "cluster1"})
-			t.Override(&kubernetes.Client, mockK8sClient)
+			t.Override(&client.Client, mockK8sClient)
 			test.testBench.cycles = len(test.watchEvents)
-
-			runner := createRunner(t, test.testBench, &TestMonitor{
-				events:    test.watchEvents,
-				testBench: test.testBench,
-			})
-
-			err := runner.Dev(context.Background(), ioutil.Discard, []*latest.Artifact{
+			artifacts := []*latest.Artifact{
 				{ImageName: "img1"},
 				{ImageName: "img2"},
-			})
+			}
+			r := createRunner(t, test.testBench, &TestMonitor{
+				events:    test.watchEvents,
+				testBench: test.testBench,
+			}, artifacts, nil)
+
+			err := r.Dev(context.Background(), io.Discard, artifacts)
 
 			t.CheckNoError(err)
 			t.CheckDeepEqual(test.expectedActions, test.testBench.Actions())
+		})
+	}
+}
+
+func TestDevAutoTriggers(t *testing.T) {
+	tests := []struct {
+		description     string
+		watchEvents     []filemon.Events
+		expectedActions []Actions
+		autoTriggers    triggerState // the state of auto triggers
+		singleTriggers  triggerState // the state of single intent triggers at the end of dev loop
+		userIntents     []func(i *Intents)
+	}{
+		{
+			description: "build on; sync on; deploy on",
+			watchEvents: []filemon.Events{
+				{Modified: []string{"file1"}},
+				{Modified: []string{"file2"}},
+			},
+			autoTriggers:   triggerState{true, true, true},
+			singleTriggers: triggerState{true, true, true},
+			expectedActions: []Actions{
+				{
+					Synced: []string{"img1:1"},
+				},
+				{
+					Built:    []string{"img2:2"},
+					Tested:   []string{"img2:2"},
+					Rendered: []string{"img1:1", "img2:2"},
+					Deployed: []string{"img1:1", "img2:2"},
+				},
+			},
+		},
+		{
+			description: "build off; sync off; deploy off",
+			watchEvents: []filemon.Events{
+				{Modified: []string{"file1"}},
+				{Modified: []string{"file2"}},
+			},
+			expectedActions: []Actions{{}, {}},
+		},
+		{
+			description: "build on; sync off; deploy off",
+			watchEvents: []filemon.Events{
+				{Modified: []string{"file1"}},
+				{Modified: []string{"file2"}},
+			},
+			autoTriggers:   triggerState{true, false, false},
+			singleTriggers: triggerState{true, false, false},
+			expectedActions: []Actions{{}, {
+				Built:  []string{"img2:2"},
+				Tested: []string{"img2:2"},
+			}},
+		},
+		{
+			description: "build off; sync on; deploy off",
+			watchEvents: []filemon.Events{
+				{Modified: []string{"file1"}},
+				{Modified: []string{"file2"}},
+			},
+			autoTriggers:   triggerState{false, true, false},
+			singleTriggers: triggerState{false, true, false},
+			expectedActions: []Actions{{
+				Synced: []string{"img1:1"},
+			}, {}},
+		},
+		{
+			description: "build off; sync off; deploy on",
+			watchEvents: []filemon.Events{
+				{Modified: []string{"file1"}},
+				{Modified: []string{"file2"}},
+			},
+			autoTriggers:    triggerState{false, false, true},
+			singleTriggers:  triggerState{false, false, true},
+			expectedActions: []Actions{{}, {}},
+		},
+		{
+			description:     "build off; sync off; deploy off; user requests build, but no change so intent is discarded",
+			watchEvents:     []filemon.Events{},
+			autoTriggers:    triggerState{false, false, false},
+			singleTriggers:  triggerState{false, false, false},
+			expectedActions: []Actions{},
+			userIntents: []func(i *Intents){
+				func(i *Intents) {
+					i.SetBuild(true)
+				},
+			},
+		},
+		{
+			description:     "build off; sync off; deploy off; user requests build, and then sync, but no change so both intents are discarded",
+			watchEvents:     []filemon.Events{},
+			autoTriggers:    triggerState{false, false, false},
+			singleTriggers:  triggerState{false, false, false},
+			expectedActions: []Actions{},
+			userIntents: []func(i *Intents){
+				func(i *Intents) {
+					i.SetBuild(true)
+					i.SetSync(true)
+				},
+			},
+		},
+		{
+			description:     "build off; sync off; deploy off; user requests build, and then sync, but no change so both intents are discarded",
+			watchEvents:     []filemon.Events{},
+			autoTriggers:    triggerState{false, false, false},
+			singleTriggers:  triggerState{false, false, false},
+			expectedActions: []Actions{},
+			userIntents: []func(i *Intents){
+				func(i *Intents) {
+					i.SetBuild(true)
+				},
+				func(i *Intents) {
+					i.SetSync(true)
+				},
+			},
+		},
+	}
+	// first build-test-render-deploy sequence always happens
+	firstAction := Actions{
+		Built:    []string{"img1:1", "img2:1"},
+		Tested:   []string{"img1:1", "img2:1"},
+		Rendered: []string{"img1:1", "img2:1"},
+		Deployed: []string{"img1:1", "img2:1"},
+	}
+
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			t.SetupFakeKubernetesContext(api.Config{CurrentContext: "cluster1"})
+			t.Override(&client.Client, mockK8sClient)
+			t.Override(&sync.WorkingDir, func(context.Context, string, docker.Config) (string, error) { return "/", nil })
+			testBench := &TestBench{}
+			testBench.cycles = len(test.watchEvents)
+			testBench.userIntents = test.userIntents
+			artifacts := []*latest.Artifact{
+				{
+					ImageName: "img1",
+					Sync: &latest.Sync{
+						Manual: []*latest.SyncRule{{Src: "file1", Dest: "file1"}},
+					},
+				},
+				{
+					ImageName: "img2",
+				},
+			}
+			r := createRunner(t, testBench, &TestMonitor{
+				events:    test.watchEvents,
+				testBench: testBench,
+			}, artifacts, &test.autoTriggers)
+
+			testBench.intents = r.intents
+
+			err := r.Dev(context.Background(), io.Discard, artifacts)
+
+			t.CheckNoError(err)
+			t.CheckDeepEqual(append([]Actions{firstAction}, test.expectedActions...), testBench.Actions())
+
+			build, _sync, deploy := r.intents.GetIntentsAttrs()
+			singleTriggers := triggerState{
+				build:  build,
+				sync:   _sync,
+				deploy: deploy,
+			}
+			t.CheckDeepEqual(test.singleTriggers, singleTriggers, cmp.AllowUnexported(triggerState{}))
 		})
 	}
 }
@@ -309,6 +518,7 @@ func TestDevSync(t *testing.T) {
 				{
 					Built:    []string{"img1:1", "img2:1"},
 					Tested:   []string{"img1:1", "img2:1"},
+					Rendered: []string{"img1:1", "img2:1"},
 					Deployed: []string{"img1:1", "img2:1"},
 				},
 				{
@@ -332,6 +542,7 @@ func TestDevSync(t *testing.T) {
 				{
 					Built:    []string{"img1:1", "img2:1"},
 					Tested:   []string{"img1:1", "img2:1"},
+					Rendered: []string{"img1:1", "img2:1"},
 					Deployed: []string{"img1:1", "img2:1"},
 				},
 				{
@@ -352,19 +563,13 @@ func TestDevSync(t *testing.T) {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			var actualFileSyncEventCalls fileSyncEventCalls
 			t.SetupFakeKubernetesContext(api.Config{CurrentContext: "cluster1"})
-			t.Override(&kubernetes.Client, mockK8sClient)
+			t.Override(&client.Client, mockK8sClient)
 			t.Override(&fileSyncInProgress, func(int, string) { actualFileSyncEventCalls.InProgress++ })
 			t.Override(&fileSyncFailed, func(int, string, error) { actualFileSyncEventCalls.Failed++ })
 			t.Override(&fileSyncSucceeded, func(int, string) { actualFileSyncEventCalls.Succeeded++ })
-			t.Override(&sync.WorkingDir, func(string, map[string]bool) (string, error) { return "/", nil })
+			t.Override(&sync.WorkingDir, func(context.Context, string, docker.Config) (string, error) { return "/", nil })
 			test.testBench.cycles = len(test.watchEvents)
-
-			runner := createRunner(t, test.testBench, &TestMonitor{
-				events:    test.watchEvents,
-				testBench: test.testBench,
-			})
-
-			err := runner.Dev(context.Background(), ioutil.Discard, []*latest.Artifact{
+			artifacts := []*latest.Artifact{
 				{
 					ImageName: "img1",
 					Sync: &latest.Sync{
@@ -374,7 +579,13 @@ func TestDevSync(t *testing.T) {
 				{
 					ImageName: "img2",
 				},
-			})
+			}
+			r := createRunner(t, test.testBench, &TestMonitor{
+				events:    test.watchEvents,
+				testBench: test.testBench,
+			}, artifacts, nil)
+
+			err := r.Dev(context.Background(), io.Discard, artifacts)
 
 			t.CheckNoError(err)
 			t.CheckDeepEqual(test.expectedActions, test.testBench.Actions())

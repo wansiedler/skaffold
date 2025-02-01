@@ -20,31 +20,57 @@ import (
 	"context"
 	"io"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/tag"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/tag"
 )
-
-// Artifact is the result corresponding to each successful build.
-type Artifact struct {
-	ImageName string `json:"imageName"`
-	Tag       string `json:"tag"`
-}
 
 // Builder is an interface to the Build API of Skaffold.
 // It must build and make the resulting image accessible to the cluster.
 // This could include pushing to a authorized repository or loading the nodes with the image.
 // If artifacts is supplied, the builder should only rebuild those artifacts.
 type Builder interface {
-	Labels() map[string]string
-
-	Build(ctx context.Context, out io.Writer, tags tag.ImageTags, artifacts []*latest.Artifact) ([]Artifact, error)
+	Build(ctx context.Context, out io.Writer, tags tag.ImageTags, platforms platform.Resolver, artifacts []*latest.Artifact) ([]graph.Artifact, error)
 
 	// Prune removes images built with Skaffold
 	Prune(context.Context, io.Writer) error
+}
+
+// PipelineBuilder is an interface for a specific Skaffold config pipeline build type.
+// Current implementations are the `local`, `cluster` and `gcb`
+type PipelineBuilder interface {
+
+	// PreBuild executes any one-time setup required prior to starting any build on this builder
+	PreBuild(ctx context.Context, out io.Writer) error
+
+	// Build returns the `ArtifactBuilder` based on this build pipeline type
+	Build(ctx context.Context, out io.Writer, artifact *latest.Artifact) ArtifactBuilder
+
+	// PostBuild executes any one-time teardown required after all builds on this builder are complete
+	PostBuild(ctx context.Context, out io.Writer) error
+
+	// Concurrency specifies the max number of builds that can run at any one time. If concurrency is 0, then all builds can run in parallel.
+	Concurrency() *int
+
+	// Prune removes images built in this pipeline
+	Prune(context.Context, io.Writer) error
+
+	// PushImages specifies if the built image needs to be explicitly pushed to an image registry.
+	PushImages() bool
+
+	// SupportedPlatforms returns the platforms supported for building the image by this build pipeline type.
+	SupportedPlatforms() platform.Matcher
 }
 
 type ErrSyncMapNotSupported struct{}
 
 func (ErrSyncMapNotSupported) Error() string {
 	return "SyncMap is not supported by this builder"
+}
+
+type ErrCustomBuildNoDockerfile struct{}
+
+func (ErrCustomBuildNoDockerfile) Error() string {
+	return "inferred sync with custom build requires explicitly declared Dockerfile dependency"
 }

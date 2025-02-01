@@ -27,11 +27,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
-	"github.com/GoogleContainerTools/skaffold/cmd/skaffold/app/cmd"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/cmd/skaffold/app/cmd"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	timeutil "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util/time"
 )
 
 // RunBuilder is used to build a command line to run `skaffold`.
@@ -45,6 +45,13 @@ type RunBuilder struct {
 	args       []string
 	env        []string
 	stdin      []byte
+}
+
+const DefaultRepo = "us-central1-docker.pkg.dev/k8s-skaffold/testing"
+
+// Apply runs `skaffold apply` with the given arguments.
+func Apply(args ...string) *RunBuilder {
+	return withDefaults("apply", args)
 }
 
 // Dev runs `skaffold dev` with the given arguments.
@@ -62,9 +69,24 @@ func Build(args ...string) *RunBuilder {
 	return withDefaults("build", args)
 }
 
+// Test runs `skaffold test` with the given arguments.
+func Test(args ...string) *RunBuilder {
+	return withDefaults("test", args)
+}
+
 // Deploy runs `skaffold deploy` with the given arguments.
 func Deploy(args ...string) *RunBuilder {
 	return withDefaults("deploy", args)
+}
+
+// Verify runs `skaffold verify` with the given arguments.
+func Verify(args ...string) *RunBuilder {
+	return withDefaults("verify", args)
+}
+
+// Exec runs `skaffold exec` with the given arguments.
+func Exec(args ...string) *RunBuilder {
+	return withDefaults("exec", args)
 }
 
 // Debug runs `skaffold debug` with the given arguments.
@@ -112,12 +134,26 @@ func Render(args ...string) *RunBuilder {
 	return withDefaults("render", args)
 }
 
+// Inspect runs `skaffold inspect` with the given arguments.
+func Inspect(args ...string) *RunBuilder {
+	return &RunBuilder{command: "inspect", args: args}
+}
+
+// Filter runs `skaffold filter` with the given arguments.
+func Filter(args ...string) *RunBuilder {
+	return withDefaults("filter", args)
+}
+
 func GeneratePipeline(args ...string) *RunBuilder {
 	return withDefaults("generate-pipeline", args)
 }
 
 func withDefaults(command string, args []string) *RunBuilder {
-	return &RunBuilder{command: command, args: args, repo: "gcr.io/k8s-skaffold"}
+	repo := os.Getenv("DEFAULT_REPO")
+	if repo == "" {
+		repo = DefaultRepo
+	}
+	return &RunBuilder{command: command, args: args, repo: repo}
 }
 
 // InDir sets the directory in which skaffold is running.
@@ -162,35 +198,60 @@ func (b *RunBuilder) WithProfiles(profiles []string) *RunBuilder {
 	return b
 }
 
-// RunBackground runs the skaffold command in the background.
-func (b *RunBuilder) RunBackground(t *testing.T) io.ReadCloser {
+// RunBackground runs the skaffold command in the background.  The Skaffold output
+// is accumulated and logged on test failure.
+func (b *RunBuilder) RunBackground(t *testing.T) {
 	t.Helper()
+	out := bytes.Buffer{}
+	b.runForked(t, &out)
 
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Log("Skaffold log:\n", strings.ReplaceAll(out.String(), "\n", "\n> "))
+		}
+	})
+}
+
+// RunLive runs the skaffold command in the background with live output.
+// !!Warning!! RunLive blocks the skaffold command until the caller reads from
+// the returned `PipeReader`. Please use `WaitForLogs` or similar to read
+// continuously from the returned `PipeReader`.
+func (b *RunBuilder) RunLive(t *testing.T) io.ReadCloser {
+	t.Helper()
 	pr, pw := io.Pipe()
+	b.runForked(t, pw)
+	t.Cleanup(func() {
+		pr.Close()
+	})
+	return pr
+}
+
+// RunInBackgroundWithOutput runs the skaffold command in the background.
+func (b *RunBuilder) RunInBackgroundWithOutput(t *testing.T, out io.Writer) {
+	t.Helper()
+	b.runForked(t, out)
+}
+
+// runForked runs the skaffold command in the background with stdout sent to the provided writer.
+func (b *RunBuilder) runForked(t *testing.T, out io.Writer) {
+	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	cmd := b.cmd(ctx)
-	cmd.Stdout = pw
-	logrus.Infoln(cmd.Args)
+	cmd.Stdout = out
+	t.Logf("Running %s in %s", cmd.Args, cmd.Dir)
 
-	start := time.Now()
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("skaffold %s: %v", b.command, err)
 	}
 
-	go func() {
-		cmd.Wait()
-		logrus.Infoln("Ran in", time.Since(start))
-	}()
+	waitAndTriggerStacktrace(ctx, t, cmd.Process)
 
 	t.Cleanup(func() {
 		cancel()
 		cmd.Wait()
-		pr.Close()
 	})
-
-	return pr
 }
 
 // RunOrFail runs the skaffold command and fails the test
@@ -204,15 +265,25 @@ func (b *RunBuilder) Run(t *testing.T) error {
 	t.Helper()
 
 	cmd := b.cmd(context.Background())
-	logrus.Infoln(cmd.Args)
+	t.Logf("Running %s in %s", cmd.Args, cmd.Dir)
 
-	start := time.Now()
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("skaffold %q: %w", b.command, err)
 	}
-
-	logrus.Infoln("Ran in", time.Since(start))
 	return nil
+}
+
+// StartWithProcess starts the skaffold command and returns the process id and error.
+func (b *RunBuilder) StartWithProcess(t *testing.T) (*os.Process, error) {
+	t.Helper()
+
+	cmd := b.cmd(context.Background())
+	t.Logf("Running %s in %s", cmd.Args, cmd.Dir)
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("skaffold %q: %w", b.command, err)
+	}
+	return cmd.Process, nil
 }
 
 // RunWithCombinedOutput runs the skaffold command and returns the combined standard output and error.
@@ -221,15 +292,14 @@ func (b *RunBuilder) RunWithCombinedOutput(t *testing.T) ([]byte, error) {
 
 	cmd := b.cmd(context.Background())
 	cmd.Stdout, cmd.Stderr = nil, nil
-	logrus.Infoln(cmd.Args)
+	t.Logf("Running %s in %s", cmd.Args, cmd.Dir)
 
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return out, fmt.Errorf("skaffold %q: %w", b.command, err)
 	}
-
-	logrus.Infoln("Ran in", time.Since(start))
+	t.Logf("Ran %s in %v", cmd.Args, timeutil.Humanize(time.Since(start)))
 	return out, nil
 }
 
@@ -241,19 +311,40 @@ func (b *RunBuilder) RunOrFailOutput(t *testing.T) []byte {
 
 	cmd := b.cmd(context.Background())
 	cmd.Stdout, cmd.Stderr = nil, nil
-	logrus.Infoln(cmd.Args)
+	t.Logf("Running %s in %s", cmd.Args, cmd.Dir)
 
 	start := time.Now()
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
-			defer t.Errorf(string(ee.Stderr))
+			defer t.Error(string(ee.Stderr))
 		}
 		t.Fatalf("skaffold %s: %v, %s", b.command, err, out)
 	}
-
-	logrus.Infoln("Ran in", time.Since(start))
+	t.Logf("Ran %s in %v", cmd.Args, timeutil.Humanize(time.Since(start)))
 	return out
+}
+
+// RunWithStdoutAndStderrOrFail runs the Skaffold command copying the stdout and stderr to the given writers.
+// Fails if there is an error.
+func (b *RunBuilder) RunWithStdoutAndStderrOrFail(t *testing.T, stdout, stderr io.Writer) {
+	t.Helper()
+
+	cmd := b.cmd(context.Background())
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	t.Logf("Running %s in %s", cmd.Args, cmd.Dir)
+
+	start := time.Now()
+	err := cmd.Run()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			defer t.Error(string(ee.Stderr))
+		}
+		t.Fatalf("skaffold %s: %v, %s", b.command, err, stderr)
+	}
+
+	t.Logf("Ran %s in %v", cmd.Args, timeutil.Humanize(time.Since(start)))
 }
 
 func (b *RunBuilder) cmd(ctx context.Context) *exec.Cmd {

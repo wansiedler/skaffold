@@ -17,11 +17,14 @@ limitations under the License.
 package yamltags
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
+	"unicode"
 
-	"github.com/sirupsen/logrus"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/yaml"
 )
 
 type fieldSet map[string]struct{}
@@ -30,7 +33,7 @@ type fieldSet map[string]struct{}
 func ValidateStruct(s interface{}) error {
 	parentStruct := reflect.Indirect(reflect.ValueOf(s))
 	t := parentStruct.Type()
-	logrus.Debugf("validating yamltags of struct %s", t.Name())
+	log.Entry(context.TODO()).Tracef("validating yamltags of struct %s", t.Name())
 
 	// Loop through the fields on the struct, looking for tags.
 	for i := 0; i < t.NumField(); i++ {
@@ -57,6 +60,71 @@ func YamlName(field reflect.StructField) string {
 	return field.Name
 }
 
+// GetYamlTag returns the first yaml tag used in the raw yaml text of the given struct
+func GetYamlTag(value interface{}) string {
+	buf, err := yaml.Marshal(value)
+	if err != nil {
+		log.Entry(context.TODO()).Warnf("error marshaling %-v", value)
+		return ""
+	}
+	rawStr := string(buf)
+	i := strings.Index(rawStr, ":")
+	if i == -1 {
+		return ""
+	}
+	return rawStr[:i]
+}
+
+// GetYamlKeys returns the yaml key for each non-nested field of the given non-nil config parameter
+// For example if config is `latest.DeployType{LegacyHelmDeploy: &LegacyHelmDeploy{...}, KustomizeDeploy: &KustomizeDeploy{...}}`
+// then it returns `["helm", "kustomize"]`
+func GetYamlKeys(config interface{}) []string {
+	var tags []string
+	if config == nil {
+		return tags
+	}
+	st := reflect.Indirect(reflect.ValueOf(config))
+	t := st.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		v := st.Field(i)
+		if v.Kind() == reflect.Ptr && v.IsNil() { // exclude ptr fields not explicitly defined in the configuration
+			continue
+		}
+		tag := getYamlKey(f)
+		if tag != "" {
+			tags = append(tags, tag)
+		}
+	}
+	return tags
+}
+
+func getYamlKey(f reflect.StructField) string {
+	if f.PkgPath != "" { // field is unexported
+		return ""
+	}
+	t, ok := f.Tag.Lookup("yaml")
+	if !ok {
+		return lowerCaseFirst(f.Name)
+	}
+	tags := strings.Split(t, ",")
+	for i := 1; i < len(tags); i++ { // return empty string if it contains yaml flag `inline`
+		if tags[i] == "inline" {
+			return ""
+		}
+	}
+	if len(tags) == 0 || tags[0] == "" {
+		return lowerCaseFirst(f.Name)
+	}
+	return tags[0]
+}
+
+func lowerCaseFirst(s string) string {
+	r := []rune(s)
+	r[0] = unicode.ToLower(r[0])
+	return string(r)
+}
+
 func processTags(yamltags string, val reflect.Value, parentStruct reflect.Value, field reflect.StructField) error {
 	tags := strings.Split(yamltags, ",")
 	for _, tag := range tags {
@@ -72,8 +140,12 @@ func processTags(yamltags string, val reflect.Value, parentStruct reflect.Value,
 				Field:  field,
 				Parent: parentStruct,
 			}
+		case "skipTrim":
+			yt = &skipTrimTag{
+				Field: field,
+			}
 		default:
-			logrus.Panicf("unknown yaml tag in %s", yamltags)
+			log.Entry(context.TODO()).Panicf("unknown yaml tag in %s", yamltags)
 		}
 		if err := yt.Load(tagParts); err != nil {
 			return err
@@ -162,6 +234,24 @@ func (oot *oneOfTag) Process(val reflect.Value) error {
 		if !isZeroValue(field) {
 			return fmt.Errorf("only one element in set %s can be set. got %s and %s", oot.setName, otherField, oot.Field.Name)
 		}
+	}
+	return nil
+}
+
+type skipTrimTag struct {
+	Field reflect.StructField
+}
+
+func (tag *skipTrimTag) Load(s []string) error {
+	return nil
+}
+
+func (tag *skipTrimTag) Process(val reflect.Value) error {
+	if isZeroValue(val) {
+		if tags, ok := tag.Field.Tag.Lookup("yaml"); ok {
+			return fmt.Errorf("skipTrim value not set: %s", strings.Split(tags, ",")[0])
+		}
+		return fmt.Errorf("skipTrim value not set: %s", tag.Field.Name)
 	}
 	return nil
 }

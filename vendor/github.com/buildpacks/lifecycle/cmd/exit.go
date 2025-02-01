@@ -7,17 +7,15 @@ import (
 )
 
 const (
-	CodeFailed = 1
+	CodeForFailed = 1
 	// 2: reserved
-	CodeInvalidArgs = 3
-	// 4: CodeInvalidEnv
-	// 5: CodeNotFound
-	CodeFailedDetect = 6
-	CodeFailedBuild  = 7
-	CodeFailedLaunch = 8
-	// 9: CodeFailedUpdate
-	CodeFailedSave   = 10
-	CodeIncompatible = 11
+	CodeForInvalidArgs = 3
+	// 4: CodeForInvalidEnv
+	// 5: CodeForNotFound
+	// 9: CodeForFailedUpdate
+
+	CodeForIncompatiblePlatformAPI  = 11
+	CodeForIncompatibleBuildpackAPI = 12
 )
 
 type ErrorFail struct {
@@ -39,7 +37,7 @@ func FailCode(code int, action ...string) *ErrorFail {
 }
 
 func FailErr(err error, action ...string) *ErrorFail {
-	code := CodeFailed
+	code := CodeForFailed
 	if err, ok := err.(*ErrorFail); ok {
 		code = err.Code
 	}
@@ -54,14 +52,14 @@ func Exit(err error) {
 	if err == nil {
 		os.Exit(0)
 	}
-	Logger.Errorf("%s\n", err)
+	DefaultLogger.Errorf("%s\n", err)
 	if err, ok := err.(*ErrorFail); ok {
 		os.Exit(err.Code)
 	}
-	os.Exit(CodeFailed)
+	os.Exit(CodeForFailed)
 }
 
 func ExitWithVersion() {
-	Logger.Infof(buildVersion())
+	DefaultLogger.Infof(buildVersion())
 	os.Exit(0)
 }

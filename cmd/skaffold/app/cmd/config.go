@@ -20,13 +20,13 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/GoogleContainerTools/skaffold/cmd/skaffold/app/cmd/config"
+	"github.com/GoogleContainerTools/skaffold/v2/cmd/skaffold/app/cmd/config"
 )
 
 func NewCmdConfig() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "Interact with the Skaffold configuration",
+		Short: "Interact with the global Skaffold config file (defaults to `$HOME/.skaffold/config`)",
 	}
 
 	cmd.AddCommand(NewCmdSet())
@@ -40,8 +40,9 @@ func NewCmdSet() *cobra.Command {
 		WithDescription("Set a value in the global Skaffold config").
 		WithExample("Mark a registry as insecure", "config set insecure-registries <insecure1.io>").
 		WithExample("Globally set the default image repository", "config set default-repo <myrepo>").
+		WithExample("Globally set multi-level repo support", "config set multi-level-repo true").
 		WithExample("Disable pushing images for a given Kubernetes context", "config set --kube-context <mycluster> local-cluster true").
-		WithFlags(func(f *pflag.FlagSet) {
+		WithFlagAdder(func(f *pflag.FlagSet) {
 			config.AddCommonFlags(f)
 			config.AddSetUnsetFlags(f)
 		}).
@@ -51,7 +52,7 @@ func NewCmdSet() *cobra.Command {
 func NewCmdUnset() *cobra.Command {
 	return NewCmd("unset").
 		WithDescription("Unset a value in the global Skaffold config").
-		WithFlags(func(f *pflag.FlagSet) {
+		WithFlagAdder(func(f *pflag.FlagSet) {
 			config.AddCommonFlags(f)
 			config.AddSetUnsetFlags(f)
 		}).
@@ -61,7 +62,7 @@ func NewCmdUnset() *cobra.Command {
 func NewCmdList() *cobra.Command {
 	return NewCmd("list").
 		WithDescription("List all values set in the global Skaffold config").
-		WithFlags(func(f *pflag.FlagSet) {
+		WithFlagAdder(func(f *pflag.FlagSet) {
 			config.AddCommonFlags(f)
 			config.AddListFlags(f)
 		}).

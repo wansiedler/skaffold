@@ -21,93 +21,138 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/sirupsen/logrus"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/bazel"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/buildpacks"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/custom"
+	dockerbuilder "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/jib"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/ko"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/misc"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 // Builder uses the host docker daemon to build and tag the image.
 type Builder struct {
-	cfg latest.LocalBuild
+	local latest.LocalBuild
 
+	cfg                docker.Config
 	localDocker        docker.LocalDaemon
 	localCluster       bool
 	pushImages         bool
+	tryImportMissing   bool
 	prune              bool
 	pruneChildren      bool
 	skipTests          bool
-	devMode            bool
+	mode               config.RunMode
 	kubeContext        string
 	builtImages        []string
 	insecureRegistries map[string]bool
+	muted              build.Muted
+	localPruner        *pruner
+	artifactStore      build.ArtifactStore
+	sourceDependencies graph.SourceDependenciesCache
 }
 
-// external dependencies are wrapped
-// into private functions for testability
+type Config interface {
+	docker.Config
 
-var getLocalCluster = config.GetLocalCluster
+	GlobalConfig() string
+	GetKubeContext() string
+	GetCluster() config.Cluster
+	SkipTests() bool
+	Mode() config.RunMode
+	NoPruneChildren() bool
+	Muted() config.Muted
+	PushImages() config.BoolOrUndefined
+}
+
+type BuilderContext interface {
+	Config
+	ArtifactStore() build.ArtifactStore
+	SourceDependenciesResolver() graph.SourceDependenciesCache
+}
 
 // NewBuilder returns an new instance of a local Builder.
-func NewBuilder(runCtx *runcontext.RunContext) (*Builder, error) {
-	localDocker, err := docker.NewAPIClient(runCtx)
+func NewBuilder(ctx context.Context, bCtx BuilderContext, buildCfg *latest.LocalBuild) (*Builder, error) {
+	localDocker, err := docker.NewAPIClient(ctx, bCtx)
 	if err != nil {
 		return nil, fmt.Errorf("getting docker client: %w", err)
 	}
 
-	// TODO(https://github.com/GoogleContainerTools/skaffold/issues/3668):
-	// remove minikubeProfile from here and instead detect it by matching the
-	// kubecontext API Server to minikube profiles
-
-	localCluster, err := getLocalCluster(runCtx.Opts.GlobalConfig, runCtx.Opts.MinikubeProfile)
-	if err != nil {
-		return nil, fmt.Errorf("getting localCluster: %w", err)
-	}
+	cluster := bCtx.GetCluster()
+	pushFlag := bCtx.PushImages()
 
 	var pushImages bool
-	if runCtx.Cfg.Build.LocalBuild.Push == nil {
-		pushImages = !localCluster
-		logrus.Debugf("push value not present, defaulting to %t because localCluster is %t", pushImages, localCluster)
-	} else {
-		pushImages = *runCtx.Cfg.Build.LocalBuild.Push
+	switch {
+	case pushFlag.Value() != nil:
+		pushImages = *pushFlag.Value()
+		log.Entry(context.TODO()).Debugf("push value set via skaffold build --push flag, --push=%t", *pushFlag.Value())
+	case buildCfg.Push == nil:
+		pushImages = cluster.PushImages
+		log.Entry(context.TODO()).Debugf("push value not present in NewBuilder, defaulting to %t because cluster.PushImages is %t", pushImages, cluster.PushImages)
+	default:
+		pushImages = *buildCfg.Push
 	}
 
+	tryImportMissing := buildCfg.TryImportMissing
+
 	return &Builder{
-		cfg:                *runCtx.Cfg.Build.LocalBuild,
-		kubeContext:        runCtx.KubeContext,
+		local:              *buildCfg,
+		cfg:                bCtx,
+		kubeContext:        bCtx.GetKubeContext(),
 		localDocker:        localDocker,
-		localCluster:       localCluster,
+		localCluster:       cluster.Local,
 		pushImages:         pushImages,
-		skipTests:          runCtx.Opts.SkipTests,
-		devMode:            runCtx.Opts.IsDevMode(),
-		prune:              runCtx.Opts.Prune(),
-		pruneChildren:      !runCtx.Opts.NoPruneChildren,
-		insecureRegistries: runCtx.InsecureRegistries,
+		tryImportMissing:   tryImportMissing,
+		skipTests:          bCtx.SkipTests(),
+		mode:               bCtx.Mode(),
+		prune:              bCtx.Prune(),
+		pruneChildren:      !bCtx.NoPruneChildren(),
+		localPruner:        newPruner(localDocker, !bCtx.NoPruneChildren()),
+		insecureRegistries: bCtx.GetInsecureRegistries(),
+		muted:              bCtx.Muted(),
+		artifactStore:      bCtx.ArtifactStore(),
+		sourceDependencies: bCtx.SourceDependenciesResolver(),
 	}, nil
 }
 
-func (b *Builder) PushImages() bool {
-	return b.pushImages
+// artifactBuilder represents a per artifact builder interface
+type artifactBuilder interface {
+	Build(ctx context.Context, out io.Writer, a *latest.Artifact, tag string, platforms platform.Matcher) (string, error)
+	SupportedPlatforms() platform.Matcher
 }
 
-// Labels are labels specific to local builder.
-func (b *Builder) Labels() map[string]string {
-	labels := map[string]string{
-		constants.Labels.Builder: "local",
+// newPerArtifactBuilder returns an instance of `artifactBuilder`
+func newPerArtifactBuilder(b *Builder, a *latest.Artifact) (artifactBuilder, error) {
+	switch {
+	case a.DockerArtifact != nil:
+		return dockerbuilder.NewArtifactBuilder(b.localDocker, b.cfg, b.local.UseDockerCLI, b.local.UseBuildkit, b.pushImages, b.artifactStore, b.sourceDependencies), nil
+
+	case a.BazelArtifact != nil:
+		return bazel.NewArtifactBuilder(b.localDocker, b.cfg, b.pushImages), nil
+
+	case a.JibArtifact != nil:
+		return jib.NewArtifactBuilder(b.localDocker, b.cfg, b.pushImages, b.skipTests, b.artifactStore), nil
+
+	case a.CustomArtifact != nil:
+		// required artifacts as environment variables
+		dependencies := util.EnvPtrMapToSlice(docker.ResolveDependencyImages(a.Dependencies, b.artifactStore, true), "=")
+		return custom.NewArtifactBuilder(b.localDocker, b.cfg, b.pushImages, b.skipTests, append(b.retrieveExtraEnv(), dependencies...)), nil
+
+	case a.BuildpackArtifact != nil:
+		return buildpacks.NewArtifactBuilder(b.localDocker, b.pushImages, b.mode, b.artifactStore), nil
+
+	case a.KoArtifact != nil:
+		return ko.NewArtifactBuilder(b.localDocker, b.pushImages, b.mode, b.insecureRegistries), nil
+
+	default:
+		return nil, fmt.Errorf("unexpected type %q for local artifact:\n%s", misc.ArtifactType(a), misc.FormatArtifact(a))
 	}
-
-	v, err := b.localDocker.ServerVersion(context.Background())
-	if err == nil {
-		labels[constants.Labels.DockerAPIVersion] = fmt.Sprintf("%v", v.APIVersion)
-	}
-
-	return labels
-}
-
-// Prune uses the docker API client to remove all images built with Skaffold
-func (b *Builder) Prune(ctx context.Context, out io.Writer) error {
-	return b.localDocker.Prune(ctx, out, b.builtImages, b.pruneChildren)
 }

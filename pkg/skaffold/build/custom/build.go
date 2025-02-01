@@ -21,18 +21,25 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/instrumentation"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
 )
 
 // Build builds an artifact using a custom script
-func (b *Builder) Build(ctx context.Context, out io.Writer, artifact *latest.Artifact, tag string) (string, error) {
-	if err := b.runBuildScript(ctx, out, artifact, tag); err != nil {
+func (b *Builder) Build(ctx context.Context, out io.Writer, artifact *latest.Artifact, tag string, platforms platform.Matcher) (string, error) {
+	instrumentation.AddAttributesToCurrentSpanFromContext(ctx, map[string]string{
+		"BuildType":   "custom",
+		"Context":     instrumentation.PII(artifact.Workspace),
+		"Destination": instrumentation.PII(tag),
+	})
+	if err := b.runBuildScript(ctx, out, artifact, tag, platforms); err != nil {
 		return "", fmt.Errorf("building custom artifact: %w", err)
 	}
 
 	if b.pushImages {
-		return docker.RemoteDigest(tag, b.insecureRegistries)
+		return docker.RemoteDigest(tag, b.cfg, nil)
 	}
 
 	imageID, err := b.localDocker.ImageID(ctx, tag)
@@ -45,3 +52,5 @@ func (b *Builder) Build(ctx context.Context, out io.Writer, artifact *latest.Art
 
 	return imageID, nil
 }
+
+func (b *Builder) SupportedPlatforms() platform.Matcher { return platform.All }

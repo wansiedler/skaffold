@@ -69,7 +69,7 @@ func Write(ref name.Reference, img v1.Image, w io.Writer, opts ...WriteOption) e
 	return MultiRefWrite(map[name.Reference]v1.Image{ref: img}, w, opts...)
 }
 
-// MultiWrite writes the contents of each image to the provided reader, in the compressed format.
+// MultiWrite writes the contents of each image to the provided writer, in the compressed format.
 // The contents are written in the following format:
 // One manifest.json file at the top level containing information about several images.
 // One file for each layer, named after the layer's SHA.
@@ -82,7 +82,7 @@ func MultiWrite(tagToImage map[name.Tag]v1.Image, w io.Writer, opts ...WriteOpti
 	return MultiRefWrite(refToImage, w, opts...)
 }
 
-// MultiRefWrite writes the contents of each image to the provided reader, in the compressed format.
+// MultiRefWrite writes the contents of each image to the provided writer, in the compressed format.
 // The contents are written in the following format:
 // One manifest.json file at the top level containing information about several images.
 // One file for each layer, named after the layer's SHA.
@@ -98,21 +98,13 @@ func MultiRefWrite(refToImage map[name.Reference]v1.Image, w io.Writer, opts ...
 		}
 	}
 
-	m, err := calculateManifest(refToImage)
+	imageToTags := dedupRefToImage(refToImage)
+	size, mBytes, err := getSizeAndManifest(imageToTags)
 	if err != nil {
-		return sendUpdateReturn(o, fmt.Errorf("error calculating manifest: %v", err))
-	}
-	mBytes, err := json.Marshal(m)
-	if err != nil {
-		return sendUpdateReturn(o, fmt.Errorf("could not marshall manifest to bytes: %v", err))
+		return sendUpdateReturn(o, err)
 	}
 
-	size, err := calculateTarballSize(refToImage, mBytes)
-	if err != nil {
-		return sendUpdateReturn(o, fmt.Errorf("error calculating tarball size: %v", err))
-	}
-
-	return writeImagesToTar(refToImage, mBytes, size, w, o)
+	return writeImagesToTar(imageToTags, mBytes, size, w, o)
 }
 
 // sendUpdateReturn return the passed in error message, also sending on update channel, if it exists
@@ -134,11 +126,10 @@ func sendProgressWriterReturn(pw *progressWriter, err error) error {
 }
 
 // writeImagesToTar writes the images to the tarball
-func writeImagesToTar(refToImage map[name.Reference]v1.Image, m []byte, size int64, w io.Writer, o *writeOptions) (err error) {
+func writeImagesToTar(imageToTags map[v1.Image][]string, m []byte, size int64, w io.Writer, o *writeOptions) (err error) {
 	if w == nil {
 		return sendUpdateReturn(o, errors.New("must pass valid writer"))
 	}
-	imageToTags := dedupRefToImage(refToImage)
 
 	tw := w
 	var pw *progressWriter
@@ -228,8 +219,10 @@ func writeImagesToTar(refToImage map[name.Reference]v1.Image, m []byte, size int
 }
 
 // calculateManifest calculates the manifest and optionally the size of the tar file
-func calculateManifest(refToImage map[name.Reference]v1.Image) (m Manifest, err error) {
-	imageToTags := dedupRefToImage(refToImage)
+func calculateManifest(imageToTags map[v1.Image][]string) (m Manifest, err error) {
+	if len(imageToTags) == 0 {
+		return nil, errors.New("set of images is empty")
+	}
 
 	for img, tags := range imageToTags {
 		cfgName, err := img.ConfigName()
@@ -293,26 +286,50 @@ func calculateManifest(refToImage map[name.Reference]v1.Image) (m Manifest, err 
 	return m, nil
 }
 
-// calculateTarballSize calculates the size of the tar file
-func calculateTarballSize(refToImage map[name.Reference]v1.Image, m []byte) (size int64, err error) {
+// CalculateSize calculates the expected complete size of the output tar file
+func CalculateSize(refToImage map[name.Reference]v1.Image) (size int64, err error) {
 	imageToTags := dedupRefToImage(refToImage)
+	size, _, err = getSizeAndManifest(imageToTags)
+	return size, err
+}
 
+func getSizeAndManifest(imageToTags map[v1.Image][]string) (int64, []byte, error) {
+	m, err := calculateManifest(imageToTags)
+	if err != nil {
+		return 0, nil, fmt.Errorf("unable to calculate manifest: %w", err)
+	}
+	mBytes, err := json.Marshal(m)
+	if err != nil {
+		return 0, nil, fmt.Errorf("could not marshall manifest to bytes: %w", err)
+	}
+
+	size, err := calculateTarballSize(imageToTags, mBytes)
+	if err != nil {
+		return 0, nil, fmt.Errorf("error calculating tarball size: %w", err)
+	}
+	return size, mBytes, nil
+}
+
+// calculateTarballSize calculates the size of the tar file
+func calculateTarballSize(imageToTags map[v1.Image][]string, mBytes []byte) (size int64, err error) {
+	seenLayerDigests := make(map[string]struct{})
 	for img, name := range imageToTags {
 		manifest, err := img.Manifest()
 		if err != nil {
-			return size, fmt.Errorf("unable to get manifest for img %s: %v", name, err)
+			return size, fmt.Errorf("unable to get manifest for img %s: %w", name, err)
 		}
-		size += CalculateTarFileSize(manifest.Config.Size)
+		size += calculateSingleFileInTarSize(manifest.Config.Size)
 		for _, l := range manifest.Layers {
-			size += CalculateTarFileSize(l.Size)
+			hex := l.Digest.Hex
+			if _, ok := seenLayerDigests[hex]; ok {
+				continue
+			}
+			seenLayerDigests[hex] = struct{}{}
+			size += calculateSingleFileInTarSize(l.Size)
 		}
 	}
 	// add the manifest
-	mBytes, err := json.Marshal(m)
-	if err != nil {
-		return size, err
-	}
-	size += CalculateTarFileSize(int64(len(mBytes)))
+	size += calculateSingleFileInTarSize(int64(len(mBytes)))
 
 	// add the two padding blocks that indicate end of a tar file
 	size += 1024
@@ -324,15 +341,24 @@ func dedupRefToImage(refToImage map[name.Reference]v1.Image) map[v1.Image][]stri
 
 	for ref, img := range refToImage {
 		if tag, ok := ref.(name.Tag); ok {
-			if tags, ok := imageToTags[img]; ok && tags != nil {
-				imageToTags[img] = append(tags, tag.String())
-			} else {
-				imageToTags[img] = []string{tag.String()}
+			if tags, ok := imageToTags[img]; !ok || tags == nil {
+				imageToTags[img] = []string{}
 			}
-		} else {
-			if _, ok := imageToTags[img]; !ok {
-				imageToTags[img] = nil
+			// Docker cannot load tarballs without an explicit tag:
+			// https://github.com/google/go-containerregistry/issues/890
+			//
+			// We can't use the fully qualified tag.Name() because of rules_docker:
+			// https://github.com/google/go-containerregistry/issues/527
+			//
+			// If the tag is "latest", but tag.String() doesn't end in ":latest",
+			// just append it. Kind of gross, but should work for now.
+			ts := tag.String()
+			if tag.Identifier() == name.DefaultTag && !strings.HasSuffix(ts, ":"+name.DefaultTag) {
+				ts = fmt.Sprintf("%s:%s", ts, name.DefaultTag)
 			}
+			imageToTags[img] = append(imageToTags[img], ts)
+		} else if _, ok := imageToTags[img]; !ok {
+			imageToTags[img] = nil
 		}
 	}
 
@@ -357,7 +383,8 @@ func writeTarEntry(tf *tar.Writer, path string, r io.Reader, size int64) error {
 // ComputeManifest get the manifest.json that will be written to the tarball
 // for multiple references
 func ComputeManifest(refToImage map[name.Reference]v1.Image) (Manifest, error) {
-	return calculateManifest(refToImage)
+	imageToTags := dedupRefToImage(refToImage)
+	return calculateManifest(imageToTags)
 }
 
 // WriteOption a function option to pass to Write()
@@ -416,10 +443,10 @@ func (pw *progressWriter) Close() error {
 	return io.EOF
 }
 
-// CalculateTarFileSize calculate the size a file will take up in a tar archive,
+// calculateSingleFileInTarSize calculate the size a file will take up in a tar archive,
 // given the input data. Provided by rounding up to nearest whole block (512)
 // and adding header 512
-func CalculateTarFileSize(in int64) (out int64) {
+func calculateSingleFileInTarSize(in int64) (out int64) {
 	// doing this manually, because math.Round() works with float64
 	out += in
 	if remainder := out % 512; remainder != 0 {

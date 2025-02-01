@@ -20,70 +20,87 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"time"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/filemon"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/sync"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/filemon"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/sync"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/tag"
+	timeutil "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util/time"
 )
 
-func CheckArtifacts(ctx context.Context, runCtx *runcontext.RunContext, out io.Writer) error {
-	for _, artifact := range runCtx.Cfg.Build.Artifacts {
-		color.Default.Fprintf(out, "\n%s: %s\n", typeOfArtifact(artifact), artifact.ImageName)
+type Config interface {
+	docker.Config
 
-		if artifact.DockerArtifact != nil {
-			size, err := sizeOfDockerContext(ctx, artifact, runCtx.InsecureRegistries)
+	GetPipelines() []latest.Pipeline
+	Artifacts() []*latest.Artifact
+}
+
+func CheckArtifacts(ctx context.Context, cfg Config, tags tag.ImageTags, out io.Writer) error {
+	for _, p := range cfg.GetPipelines() {
+		for _, artifact := range p.Build.Artifacts {
+			output.Default.Fprintf(out, "\n%s: %s\n", typeOfArtifact(artifact), artifact.ImageName)
+
+			if artifact.DockerArtifact != nil {
+				size, err := sizeOfDockerContext(ctx, artifact, cfg)
+				if err != nil {
+					return fmt.Errorf("computing the size of the Docker context: %w", err)
+				}
+
+				fmt.Fprintf(out, " - Size of the context: %vbytes\n", size)
+			}
+
+			tag, ok := tags[artifact.ImageName]
+			if !ok {
+				return fmt.Errorf("getting tag for image %s", artifact.ImageName)
+			}
+
+			timeDeps1, deps, err := timeToListDependencies(ctx, artifact, tag, cfg)
 			if err != nil {
-				return fmt.Errorf("computing the size of the Docker context: %w", err)
+				return fmt.Errorf("listing artifact dependencies: %w", err)
+			}
+			timeDeps2, _, err := timeToListDependencies(ctx, artifact, tag, cfg)
+			if err != nil {
+				return fmt.Errorf("listing artifact dependencies: %w", err)
 			}
 
-			fmt.Fprintf(out, " - Size of the context: %vbytes\n", size)
-		}
+			fmt.Fprintln(out, " - Dependencies:", len(deps), "files")
+			fmt.Fprintf(out, " - Time to list dependencies: %v (2nd time: %v)\n", timeDeps1, timeDeps2)
 
-		timeDeps1, deps, err := timeToListDependencies(ctx, artifact, runCtx.InsecureRegistries)
-		if err != nil {
-			return fmt.Errorf("listing artifact dependencies: %w", err)
-		}
-		timeDeps2, _, err := timeToListDependencies(ctx, artifact, runCtx.InsecureRegistries)
-		if err != nil {
-			return fmt.Errorf("listing artifact dependencies: %w", err)
-		}
-
-		fmt.Fprintln(out, " - Dependencies:", len(deps), "files")
-		fmt.Fprintf(out, " - Time to list dependencies: %v (2nd time: %v)\n", timeDeps1, timeDeps2)
-
-		timeSyncMap1, err := timeToConstructSyncMap(artifact, runCtx.InsecureRegistries)
-		if err != nil {
-			if _, isNotSupported := err.(build.ErrSyncMapNotSupported); !isNotSupported {
-				return fmt.Errorf("construct artifact dependencies: %w", err)
+			// Only check sync map if inferred sync is configured on artifact
+			if artifact.Sync != nil && len(artifact.Sync.Infer) > 0 {
+				timeSyncMap1, err := timeToConstructSyncMap(ctx, artifact, cfg)
+				if err != nil {
+					if _, isNotSupported := err.(build.ErrSyncMapNotSupported); !isNotSupported {
+						return fmt.Errorf("constructing inferred sync map: %w", err)
+					}
+				}
+				timeSyncMap2, err := timeToConstructSyncMap(ctx, artifact, cfg)
+				if err != nil {
+					if _, isNotSupported := err.(build.ErrSyncMapNotSupported); !isNotSupported {
+						return fmt.Errorf("constructing inferred sync map: %w", err)
+					}
+				} else {
+					fmt.Fprintf(out, " - Time to construct sync map: %v (2nd time: %v)\n", timeSyncMap1, timeSyncMap2)
+				}
 			}
-		}
-		timeSyncMap2, err := timeToConstructSyncMap(artifact, runCtx.InsecureRegistries)
-		if err != nil {
-			if _, isNotSupported := err.(build.ErrSyncMapNotSupported); !isNotSupported {
-				return fmt.Errorf("construct artifact dependencies: %w", err)
+
+			timeMTimes1, err := timeToComputeMTimes(deps)
+			if err != nil {
+				return fmt.Errorf("computing modTimes: %w", err)
 			}
-		} else {
-			fmt.Fprintf(out, " - Time to construct sync-map: %v (2nd time: %v)\n", timeSyncMap1, timeSyncMap2)
-		}
+			timeMTimes2, err := timeToComputeMTimes(deps)
+			if err != nil {
+				return fmt.Errorf("computing modTimes: %w", err)
+			}
 
-		timeMTimes1, err := timeToComputeMTimes(deps)
-		if err != nil {
-			return fmt.Errorf("computing modTimes: %w", err)
+			fmt.Fprintf(out, " - Time to compute mTimes on dependencies: %v (2nd time: %v)\n", timeMTimes1, timeMTimes2)
 		}
-		timeMTimes2, err := timeToComputeMTimes(deps)
-		if err != nil {
-			return fmt.Errorf("computing modTimes: %w", err)
-		}
-
-		fmt.Fprintf(out, " - Time to compute mTimes on dependencies: %v (2nd time: %v)\n", timeMTimes1, timeMTimes2)
 	}
-
 	return nil
 }
 
@@ -101,37 +118,41 @@ func typeOfArtifact(a *latest.Artifact) string {
 		return "Custom artifact"
 	case a.BuildpackArtifact != nil:
 		return "Buildpack artifact"
+	case a.KoArtifact != nil:
+		return "Ko artifact"
 	default:
 		panic("Unknown artifact")
 	}
 }
 
-func timeToListDependencies(ctx context.Context, a *latest.Artifact, insecureRegistries map[string]bool) (time.Duration, []string, error) {
+func timeToListDependencies(ctx context.Context, a *latest.Artifact, tag string, cfg Config) (string, []string, error) {
 	start := time.Now()
-	paths, err := build.DependenciesForArtifact(ctx, a, insecureRegistries)
-	return time.Since(start), paths, err
+	g := graph.ToArtifactGraph(cfg.Artifacts())
+	sourceDependencies := graph.NewSourceDependenciesCache(cfg, nil, g)
+	paths, err := sourceDependencies.SingleArtifactDependencies(ctx, a, tag)
+	return timeutil.Humanize(time.Since(start)), paths, err
 }
 
-func timeToConstructSyncMap(a *latest.Artifact, insecureRegistries map[string]bool) (time.Duration, error) {
+func timeToConstructSyncMap(ctx context.Context, a *latest.Artifact, cfg docker.Config) (string, error) {
 	start := time.Now()
-	_, err := sync.SyncMap(a, insecureRegistries)
-	return time.Since(start), err
+	_, err := sync.SyncMap(ctx, a, cfg)
+	return timeutil.Humanize(time.Since(start)), err
 }
 
-func timeToComputeMTimes(deps []string) (time.Duration, error) {
+func timeToComputeMTimes(deps []string) (string, error) {
 	start := time.Now()
 
 	if _, err := filemon.Stat(func() ([]string, error) { return deps, nil }); err != nil {
-		return 0, fmt.Errorf("computing modTimes: %w", err)
+		return "nil", fmt.Errorf("computing modTimes: %w", err)
 	}
-
-	return time.Since(start), nil
+	return timeutil.Humanize(time.Since(start)), nil
 }
 
-func sizeOfDockerContext(ctx context.Context, a *latest.Artifact, insecureRegistries map[string]bool) (int64, error) {
+func sizeOfDockerContext(ctx context.Context, a *latest.Artifact, cfg docker.Config) (int64, error) {
 	buildCtx, buildCtxWriter := io.Pipe()
 	go func() {
-		err := docker.CreateDockerTarContext(ctx, buildCtxWriter, a.Workspace, a.DockerArtifact, insecureRegistries)
+		err := docker.CreateDockerTarContext(ctx, buildCtxWriter, docker.NewBuildConfig(
+			a.Workspace, a.ImageName, a.DockerArtifact.DockerfilePath, nil), cfg)
 		if err != nil {
 			buildCtxWriter.CloseWithError(fmt.Errorf("creating docker context: %w", err))
 			return
@@ -139,5 +160,5 @@ func sizeOfDockerContext(ctx context.Context, a *latest.Artifact, insecureRegist
 		buildCtxWriter.Close()
 	}()
 
-	return io.Copy(ioutil.Discard, buildCtx)
+	return io.Copy(io.Discard, buildCtx)
 }

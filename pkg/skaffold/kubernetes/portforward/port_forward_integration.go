@@ -22,36 +22,39 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubectl"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubectl"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	schemautil "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 // SimulateDevCycle is used for testing a port forward + stop + restart in a simulated dev cycle
-func SimulateDevCycle(t *testing.T, kubectlCLI *kubectl.CLI, namespace string) {
-	em := NewEntryManager(os.Stdout, NewKubectlForwarder(os.Stdout, kubectlCLI))
+func SimulateDevCycle(t *testing.T, kubectlCLI *kubectl.CLI, namespace string, level log.Level) {
+	log.SetLevel(level)
+	em := NewEntryManager(NewKubectlForwarder(kubectlCLI))
 	portForwardEventHandler := portForwardEvent
 	defer func() { portForwardEvent = portForwardEventHandler }()
 	portForwardEvent = func(entry *portForwardEntry) {}
 	ctx := context.Background()
-	localPort := retrieveAvailablePort("127.0.0.1", 9000, &em.forwardedPorts)
+	localPort := retrieveAvailablePort(util.Loopback, 9000, &em.forwardedPorts)
 	pfe := newPortForwardEntry(0, latest.PortForwardResource{
 		Type:      "deployment",
 		Name:      "leeroy-web",
 		Namespace: namespace,
-		Port:      8080,
+		Port:      schemautil.FromInt(8080),
 	}, "", "dummy container", "", "", localPort, false)
 	defer em.Stop()
-	em.forwardPortForwardEntry(ctx, pfe)
+	em.forwardPortForwardEntry(ctx, os.Stdout, pfe)
 	em.Stop()
 
-	logrus.Info("waiting for the same port to become available...")
+	log.Entry(ctx).Info("waiting for the same port to become available...")
 	if err := wait.Poll(100*time.Millisecond, 5*time.Second, func() (done bool, err error) {
-		nextPort := retrieveAvailablePort("127.0.0.1", localPort, &em.forwardedPorts)
+		nextPort := retrieveAvailablePort(util.Loopback, localPort, &em.forwardedPorts)
 
-		logrus.Infof("next port %d", nextPort)
+		log.Entry(ctx).Infof("next port %d", nextPort)
 
 		// theoretically we should be able to bind to the very same port
 		// this might get flaky when multiple tests are ran. However
@@ -61,5 +64,5 @@ func SimulateDevCycle(t *testing.T, kubectlCLI *kubectl.CLI, namespace string) {
 		t.Fatalf("port is not released after portforwarding stopped: %d", localPort)
 	}
 
-	em.forwardPortForwardEntry(ctx, pfe)
+	em.forwardPortForwardEntry(ctx, os.Stdout, pfe)
 }

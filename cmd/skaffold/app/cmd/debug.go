@@ -22,8 +22,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	debugging "github.com/GoogleContainerTools/skaffold/pkg/skaffold/debug"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/debug"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/debugging"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/manifest"
 )
 
 // for tests
@@ -33,17 +34,24 @@ var doDebug = runDebug
 // Unlike `dev`, `debug` defaults `auto-build` and `auto-deploy` to `false`.
 func NewCmdDebug() *cobra.Command {
 	return NewCmd("debug").
-		WithDescription("[beta] Run a pipeline in debug mode").
-		WithLongDescription("Similar to `dev`, but configures the pipeline for debugging.").
+		WithDescription("Run a pipeline in debug mode").
+		WithLongDescription("Similar to `dev`, but configures the pipeline for debugging. "+
+			"Auto-build and sync is disabled by default to prevent accidentally tearing down debug sessions.").
 		WithCommonFlags().
+		WithFlags([]*Flag{
+			{Value: &debug.Protocols, Name: "protocols", DefValue: []string{}, Usage: "Priority sorted order of debugger protocols to support."},
+		}).
+		WithExample("Launch with port-forwarding", "debug --port-forward").
+		WithHouseKeepingMessages().
 		NoArgs(func(ctx context.Context, out io.Writer) error {
 			return doDebug(ctx, out)
 		})
 }
 
 func runDebug(ctx context.Context, out io.Writer) error {
-	opts.PortForward.ForwardPods = true
-	deploy.AddManifestTransform(debugging.ApplyDebuggingTransforms)
+	// TODO(nkubala)[08/31/21]: remove in favor of conditionally executing transforms on active command at runtime
+	manifest.AddTransform(debugging.ApplyDebuggingTransforms)
+	opts.ContainerDebugging = true
 
 	return doDev(ctx, out)
 }

@@ -24,13 +24,13 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/sirupsen/logrus"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/misc"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/misc"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/constants"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 var (
@@ -38,13 +38,13 @@ var (
 	buildContext = retrieveBuildContext
 )
 
-func (b *Builder) runBuildScript(ctx context.Context, out io.Writer, a *latest.Artifact, tag string) error {
-	cmd, err := b.retrieveCmd(ctx, out, a, tag)
+func (b *Builder) runBuildScript(ctx context.Context, out io.Writer, a *latest.Artifact, tag string, platforms platform.Matcher) error {
+	cmd, err := b.retrieveCmd(ctx, out, a, tag, platforms)
 	if err != nil {
 		return fmt.Errorf("retrieving cmd: %w", err)
 	}
 
-	logrus.Debugf("Running command: %s", cmd.Args)
+	log.Entry(ctx).Debugf("Running command: %s", cmd.Args)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting cmd: %w", err)
 	}
@@ -52,7 +52,7 @@ func (b *Builder) runBuildScript(ctx context.Context, out io.Writer, a *latest.A
 	return misc.HandleGracefulTermination(ctx, cmd)
 }
 
-func (b *Builder) retrieveCmd(ctx context.Context, out io.Writer, a *latest.Artifact, tag string) (*exec.Cmd, error) {
+func (b *Builder) retrieveCmd(ctx context.Context, out io.Writer, a *latest.Artifact, tag string, platforms platform.Matcher) (*exec.Cmd, error) {
 	artifact := a.CustomArtifact
 
 	// Expand command
@@ -72,7 +72,7 @@ func (b *Builder) retrieveCmd(ctx context.Context, out io.Writer, a *latest.Arti
 	cmd.Stdout = out
 	cmd.Stderr = out
 
-	env, err := b.retrieveEnv(a, tag)
+	env, err := b.retrieveEnv(a, tag, platforms)
 	if err != nil {
 		return nil, fmt.Errorf("retrieving env variables for %q: %w", a.ImageName, err)
 	}
@@ -87,7 +87,7 @@ func (b *Builder) retrieveCmd(ctx context.Context, out io.Writer, a *latest.Arti
 	return cmd, nil
 }
 
-func (b *Builder) retrieveEnv(a *latest.Artifact, tag string) ([]string, error) {
+func (b *Builder) retrieveEnv(a *latest.Artifact, tag string, platforms platform.Matcher) ([]string, error) {
 	buildContext, err := buildContext(a.Workspace)
 	if err != nil {
 		return nil, fmt.Errorf("getting absolute path for artifact build context: %w", err)
@@ -95,9 +95,10 @@ func (b *Builder) retrieveEnv(a *latest.Artifact, tag string) ([]string, error) 
 
 	envs := []string{
 		fmt.Sprintf("%s=%s", constants.Image, tag),
-		fmt.Sprintf("%s=%s", constants.DeprecatedImages, tag),
 		fmt.Sprintf("%s=%t", constants.PushImage, b.pushImages),
 		fmt.Sprintf("%s=%s", constants.BuildContext, buildContext),
+		fmt.Sprintf("%s=%s", constants.Platforms, platforms.String()),
+		fmt.Sprintf("%s=%t", constants.SkipTest, b.skipTest),
 	}
 
 	ref, err := docker.ParseReference(tag)

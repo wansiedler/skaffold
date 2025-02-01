@@ -21,15 +21,14 @@ import (
 	"io"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
-	"github.com/GoogleContainerTools/skaffold/cmd/skaffold/app/cmd/schema"
+	"github.com/GoogleContainerTools/skaffold/v2/cmd/skaffold/app/cmd/schema"
 )
 
 func NewCmdSchema() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "schema",
-		Short: "List and print json schemas used to validate skaffold.yaml configuration",
+		Short: "List JSON schemas used to validate skaffold.yaml configuration",
 	}
 
 	cmd.AddCommand(NewCmdSchemaGet())
@@ -39,12 +38,12 @@ func NewCmdSchema() *cobra.Command {
 
 func NewCmdSchemaList() *cobra.Command {
 	return NewCmd("list").
+		Hidden(). // internal command
 		WithDescription("List skaffold.yaml's json schema versions").
 		WithExample("List all the versions", "schema list").
 		WithExample("List all the versions, in json format", "schema list -o json").
-		WithFlags(func(f *pflag.FlagSet) {
-			f.StringVarP(&schema.OutputType, "output", "o", "plain", "Type of output: `plain` or `json`.")
-		}).
+		WithFlags([]*Flag{
+			{Value: &schema.OutputType, Name: "output", Shorthand: "o", DefValue: "plain", Usage: "Type of output: `plain` or `json`."}}).
 		NoArgs(schema.List)
 }
 

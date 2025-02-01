@@ -17,15 +17,16 @@ limitations under the License.
 package defaults
 
 import (
-	"errors"
 	"testing"
 
 	"k8s.io/client-go/tools/clientcmd/api"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
-	kubectx "github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes/context"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build/kaniko"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/constants"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	schemautil "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestSetDefaults(t *testing.T) {
@@ -35,6 +36,10 @@ func TestSetDefaults(t *testing.T) {
 				Artifacts: []*latest.Artifact{
 					{
 						ImageName: "first",
+						Dependencies: []*latest.ArtifactDependency{
+							{ImageName: "second", Alias: "secondAlias"},
+							{ImageName: "third"},
+						},
 					},
 					{
 						ImageName: "second",
@@ -65,6 +70,25 @@ func TestSetDefaults(t *testing.T) {
 						},
 						Sync: &latest.Sync{},
 					},
+					{
+						ImageName: "sixth",
+						ArtifactType: latest.ArtifactType{
+							BuildpackArtifact: &latest.BuildpackArtifact{},
+						},
+					},
+					{
+						ImageName: "seventh",
+						ArtifactType: latest.ArtifactType{
+							BuildpackArtifact: &latest.BuildpackArtifact{},
+						},
+						Sync: &latest.Sync{Auto: util.Ptr(false)},
+					},
+					{
+						ImageName: "eights",
+						ArtifactType: latest.ArtifactType{
+							KanikoArtifact: &latest.KanikoArtifact{},
+						},
+					},
 				},
 			},
 		},
@@ -77,6 +101,8 @@ func TestSetDefaults(t *testing.T) {
 	testutil.CheckDeepEqual(t, "first", cfg.Build.Artifacts[0].ImageName)
 	testutil.CheckDeepEqual(t, ".", cfg.Build.Artifacts[0].Workspace)
 	testutil.CheckDeepEqual(t, "Dockerfile", cfg.Build.Artifacts[0].DockerArtifact.DockerfilePath)
+	testutil.CheckDeepEqual(t, "secondAlias", cfg.Build.Artifacts[0].Dependencies[0].Alias)
+	testutil.CheckDeepEqual(t, "third", cfg.Build.Artifacts[0].Dependencies[1].Alias)
 
 	testutil.CheckDeepEqual(t, "second", cfg.Build.Artifacts[1].ImageName)
 	testutil.CheckDeepEqual(t, "folder", cfg.Build.Artifacts[1].Workspace)
@@ -90,10 +116,27 @@ func TestSetDefaults(t *testing.T) {
 	testutil.CheckDeepEqual(t, []string{"."}, cfg.Build.Artifacts[3].BuildpackArtifact.Dependencies.Paths)
 	testutil.CheckDeepEqual(t, []string(nil), cfg.Build.Artifacts[3].BuildpackArtifact.Dependencies.Ignore)
 	testutil.CheckDeepEqual(t, "project.toml", cfg.Build.Artifacts[3].BuildpackArtifact.ProjectDescriptor)
-	testutil.CheckDeepEqual(t, &latest.Auto{}, cfg.Build.Artifacts[3].Sync.Auto)
+	testutil.CheckDeepEqual(t, util.Ptr(true), cfg.Build.Artifacts[3].Sync.Auto)
 
 	testutil.CheckDeepEqual(t, "fifth", cfg.Build.Artifacts[4].ImageName)
-	testutil.CheckDeepEqual(t, &latest.Auto{}, cfg.Build.Artifacts[4].Sync.Auto)
+	testutil.CheckDeepEqual(t, util.Ptr(true), cfg.Build.Artifacts[4].Sync.Auto)
+
+	testutil.CheckDeepEqual(t, "sixth", cfg.Build.Artifacts[5].ImageName)
+	testutil.CheckDeepEqual(t, []string{"."}, cfg.Build.Artifacts[5].BuildpackArtifact.Dependencies.Paths)
+	testutil.CheckDeepEqual(t, []string(nil), cfg.Build.Artifacts[5].BuildpackArtifact.Dependencies.Ignore)
+	testutil.CheckDeepEqual(t, "project.toml", cfg.Build.Artifacts[5].BuildpackArtifact.ProjectDescriptor)
+	testutil.CheckDeepEqual(t, util.Ptr(true), cfg.Build.Artifacts[5].Sync.Auto)
+
+	testutil.CheckDeepEqual(t, "seventh", cfg.Build.Artifacts[6].ImageName)
+	testutil.CheckDeepEqual(t, []string{"."}, cfg.Build.Artifacts[6].BuildpackArtifact.Dependencies.Paths)
+	testutil.CheckDeepEqual(t, []string(nil), cfg.Build.Artifacts[6].BuildpackArtifact.Dependencies.Ignore)
+	testutil.CheckDeepEqual(t, "project.toml", cfg.Build.Artifacts[6].BuildpackArtifact.ProjectDescriptor)
+	testutil.CheckDeepEqual(t, util.Ptr(false), cfg.Build.Artifacts[6].Sync.Auto)
+
+	testutil.CheckDeepEqual(t, "eights", cfg.Build.Artifacts[7].ImageName)
+	testutil.CheckDeepEqual(t, 3, *cfg.Build.Artifacts[7].KanikoArtifact.CopyMaxRetries)
+	testutil.CheckDeepEqual(t, "5m", cfg.Build.Artifacts[7].KanikoArtifact.CopyTimeout)
+	testutil.CheckDeepEqual(t, 1, *cfg.Build.Artifacts[7].KanikoArtifact.BuildContextCompressionLevel)
 }
 
 func TestSetDefaultsOnCluster(t *testing.T) {
@@ -145,7 +188,7 @@ func TestSetDefaultsOnCluster(t *testing.T) {
 
 		t.CheckNoError(err)
 		t.CheckDeepEqual("ns", cfg.Build.Cluster.Namespace)
-		t.CheckDeepEqual(constants.DefaultKanikoTimeout, cfg.Build.Cluster.Timeout)
+		t.CheckDeepEqual(kaniko.DefaultTimeout, cfg.Build.Cluster.Timeout)
 
 		// artifact types
 		t.CheckNotNil(cfg.Pipeline.Build.Artifacts[0].KanikoArtifact)
@@ -169,7 +212,7 @@ func TestSetDefaultsOnCluster(t *testing.T) {
 
 		t.CheckNoError(err)
 
-		t.CheckDeepEqual(constants.DefaultKanikoSecretMountPath, cfg.Build.Cluster.PullSecretMountPath)
+		t.CheckDeepEqual(kaniko.DefaultSecretMountPath, cfg.Build.Cluster.PullSecretMountPath)
 
 		// pull secret mount path set
 		path := "/path"
@@ -268,102 +311,16 @@ func TestSetDefaultsOnCloudBuild(t *testing.T) {
 }
 
 func TestSetDefaultsOnLocalBuild(t *testing.T) {
-	cfg := &latest.SkaffoldConfig{}
+	cfg1 := &latest.SkaffoldConfig{Pipeline: latest.Pipeline{Build: latest.BuildConfig{}}}
+	cfg2 := &latest.SkaffoldConfig{Pipeline: latest.Pipeline{Build: latest.BuildConfig{Artifacts: []*latest.Artifact{{ImageName: "foo"}}}}}
 
-	err := Set(cfg)
-
+	err := Set(cfg1)
 	testutil.CheckError(t, false, err)
-	testutil.CheckDeepEqual(t, 1, *cfg.Build.LocalBuild.Concurrency)
-}
-
-func TestSetDefaultPortForwardNamespace(t *testing.T) {
-	tests := []struct {
-		description        string
-		currentConfig      api.Config
-		currentConfigErr   error
-		cfg                *latest.SkaffoldConfig
-		expectedNamespaces []string
-	}{
-		{
-			description: "defined namespace",
-			currentConfig: api.Config{
-				CurrentContext: "cluster1",
-				Contexts: map[string]*api.Context{
-					"cluster1": {Namespace: "ns"},
-				},
-			},
-			cfg: &latest.SkaffoldConfig{
-				Pipeline: latest.Pipeline{
-					Build: latest.BuildConfig{},
-					PortForward: []*latest.PortForwardResource{
-						{
-							Type:      constants.Service,
-							Namespace: "mynamespace",
-						}, {
-							Type: constants.Service,
-						},
-					},
-				},
-			},
-			expectedNamespaces: []string{"mynamespace", "ns"},
-		},
-		{
-			description: "empty namespace",
-			currentConfig: api.Config{
-				CurrentContext: "cluster1",
-				Contexts: map[string]*api.Context{
-					"cluster1": {Namespace: ""},
-				},
-			},
-			cfg: &latest.SkaffoldConfig{
-				Pipeline: latest.Pipeline{
-					Build: latest.BuildConfig{},
-					PortForward: []*latest.PortForwardResource{
-						{
-							Type:      constants.Service,
-							Namespace: "mynamespace",
-						}, {
-							Type: constants.Service,
-						},
-					},
-				},
-			},
-			expectedNamespaces: []string{"mynamespace", "default"},
-		},
-		{
-			description:      "error getting context",
-			currentConfig:    api.Config{},
-			currentConfigErr: errors.New("ome error"),
-			cfg: &latest.SkaffoldConfig{
-				Pipeline: latest.Pipeline{
-					Build: latest.BuildConfig{},
-					PortForward: []*latest.PortForwardResource{
-						{
-							Type:      constants.Service,
-							Namespace: "mynamespace",
-						}, {
-							Type: constants.Service,
-						},
-					},
-				},
-			},
-			expectedNamespaces: []string{"mynamespace", "default"},
-		},
-	}
-
-	for _, test := range tests {
-		testutil.Run(t, test.description, func(t *testutil.T) {
-			kubectx.CurrentConfig = func() (api.Config, error) {
-				return test.currentConfig, test.currentConfigErr
-			}
-			err := Set(test.cfg)
-			t.CheckNoError(err)
-			t.CheckDeepEqual(len(test.expectedNamespaces), len(test.cfg.PortForward))
-			for i, pf := range test.cfg.PortForward {
-				t.CheckDeepEqual(test.expectedNamespaces[i], pf.Namespace)
-			}
-		})
-	}
+	testutil.CheckDeepEqual(t, latest.LocalBuild{}, *cfg1.Build.LocalBuild)
+	err = Set(cfg2)
+	testutil.CheckError(t, false, err)
+	testutil.CheckDeepEqual(t, 1, *cfg2.Build.LocalBuild.Concurrency)
+	SetDefaultDeployer(cfg2)
 }
 
 func TestSetPortForwardLocalPort(t *testing.T) {
@@ -373,10 +330,10 @@ func TestSetPortForwardLocalPort(t *testing.T) {
 			PortForward: []*latest.PortForwardResource{
 				{
 					Type: constants.Service,
-					Port: 8080,
+					Port: schemautil.FromInt(8080),
 				}, {
 					Type:      constants.Service,
-					Port:      8080,
+					Port:      schemautil.FromInt(8080),
 					LocalPort: 9000,
 				},
 			},
@@ -386,6 +343,19 @@ func TestSetPortForwardLocalPort(t *testing.T) {
 	testutil.CheckError(t, false, err)
 	testutil.CheckDeepEqual(t, 8080, cfg.PortForward[0].LocalPort)
 	testutil.CheckDeepEqual(t, 9000, cfg.PortForward[1].LocalPort)
+}
+
+func TestSetPortForwardOnEmptyPortForwardResource(t *testing.T) {
+	cfg := &latest.SkaffoldConfig{
+		Pipeline: latest.Pipeline{
+			Build: latest.BuildConfig{},
+			PortForward: []*latest.PortForwardResource{
+				nil,
+			},
+		},
+	}
+	err := Set(cfg)
+	testutil.CheckError(t, true, err)
 }
 
 func TestSetDefaultPortForwardAddress(t *testing.T) {
@@ -406,4 +376,151 @@ func TestSetDefaultPortForwardAddress(t *testing.T) {
 	testutil.CheckError(t, false, err)
 	testutil.CheckDeepEqual(t, "0.0.0.0", cfg.PortForward[0].Address)
 	testutil.CheckDeepEqual(t, constants.DefaultPortForwardAddress, cfg.PortForward[1].Address)
+}
+
+func TestSetDefaultDeployer(t *testing.T) {
+	tests := []struct {
+		description string
+		cfg         *latest.SkaffoldConfig
+		expected    latest.DeployConfig
+	}{
+		{
+			description: "no deployer definition",
+			cfg:         &latest.SkaffoldConfig{},
+			expected: latest.DeployConfig{
+				DeployType: latest.DeployType{
+					KubectlDeploy: &latest.KubectlDeploy{},
+				},
+			},
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			SetDefaultDeployer(test.cfg)
+			t.CheckDeepEqual(test.expected, test.cfg.Deploy)
+		})
+	}
+}
+
+func TestSetLogsConfig(t *testing.T) {
+	tests := []struct {
+		description string
+		input       latest.LogsConfig
+		expected    latest.LogsConfig
+	}{
+		{
+			description: "prefix defaults to 'container'",
+			input:       latest.LogsConfig{},
+			expected: latest.LogsConfig{
+				Prefix: "container",
+			},
+		},
+		{
+			description: "don't override existing prefix",
+			input: latest.LogsConfig{
+				Prefix: "none",
+			},
+			expected: latest.LogsConfig{
+				Prefix: "none",
+			},
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			cfg := latest.SkaffoldConfig{
+				Pipeline: latest.Pipeline{
+					Deploy: latest.DeployConfig{
+						Logs: test.input,
+					},
+				},
+			}
+
+			err := Set(&cfg)
+			t.CheckNoError(err)
+			t.CheckDeepEqual(test.expected, cfg.Deploy.Logs)
+		})
+	}
+}
+
+func TestSetDefaultRenderer(t *testing.T) {
+	tests := []struct {
+		description string
+		input       latest.RenderConfig
+		expected    latest.RenderConfig
+	}{
+		{
+			description: "default to rawYaml",
+			input:       latest.RenderConfig{},
+			expected: latest.RenderConfig{
+				Generate: latest.Generate{
+					RawK8s: []string{"k8s/*.yaml"},
+				},
+			},
+		},
+		{
+			description: "kustomize manifests",
+			input: latest.RenderConfig{
+				Generate: latest.Generate{
+					Kustomize: &latest.Kustomize{Paths: []string{"/kmanifests"}},
+				},
+			},
+			expected: latest.RenderConfig{
+				Generate: latest.Generate{
+					Kustomize: &latest.Kustomize{Paths: []string{"/kmanifests"}},
+				},
+			},
+		},
+		{
+			description: "kpt manifests",
+			input: latest.RenderConfig{
+				Generate: latest.Generate{
+					Kpt: []string{"/kmanifests"},
+				},
+			},
+			expected: latest.RenderConfig{
+				Generate: latest.Generate{
+					Kpt: []string{"/kmanifests"},
+				},
+			},
+		},
+		{
+			description: "helm manifests",
+			input: latest.RenderConfig{
+				Generate: latest.Generate{
+					Helm: &latest.Helm{Releases: []latest.HelmRelease{{Name: "test"}}},
+				},
+			},
+			expected: latest.RenderConfig{
+				Generate: latest.Generate{
+					Helm: &latest.Helm{Releases: []latest.HelmRelease{{Name: "test"}}},
+				},
+			},
+		},
+		{
+			description: "multi manifests",
+			input: latest.RenderConfig{
+				Generate: latest.Generate{
+					Kpt:       []string{"/kmanifests1"},
+					Kustomize: &latest.Kustomize{Paths: []string{"/kmanifests2"}},
+					Helm:      &latest.Helm{Releases: []latest.HelmRelease{{Name: "test"}}},
+				},
+			},
+			expected: latest.RenderConfig{
+				Generate: latest.Generate{
+					Kpt:       []string{"/kmanifests1"},
+					Kustomize: &latest.Kustomize{Paths: []string{"/kmanifests2"}},
+					Helm:      &latest.Helm{Releases: []latest.HelmRelease{{Name: "test"}}},
+				},
+			},
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			cfg := latest.SkaffoldConfig{
+				Pipeline: latest.Pipeline{Render: test.input},
+			}
+			SetDefaultRenderer(&cfg)
+			t.CheckDeepEqual(test.expected, cfg.Render)
+		})
+	}
 }

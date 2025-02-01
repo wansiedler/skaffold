@@ -8,15 +8,16 @@ package parser
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/pkg/errors"
 )
 
 var (
 	errDockerfileNotStringArray = errors.New("when using JSON array syntax, arrays must be comprised of strings only")
+	errDockerfileNotJSONArray   = errors.New("not a JSON array")
 )
 
 const (
@@ -25,7 +26,7 @@ const (
 
 // ignore the current argument. This will still leave a command parsed, but
 // will not incorporate the arguments into the ast.
-func parseIgnore(rest string, d *Directive) (*Node, map[string]bool, error) {
+func parseIgnore(rest string, d *directives) (*Node, map[string]bool, error) {
 	return &Node{}, nil, nil
 }
 
@@ -33,13 +34,12 @@ func parseIgnore(rest string, d *Directive) (*Node, map[string]bool, error) {
 // statement with sub-statements.
 //
 // ONBUILD RUN foo bar -> (onbuild (run foo bar))
-//
-func parseSubCommand(rest string, d *Directive) (*Node, map[string]bool, error) {
+func parseSubCommand(rest string, d *directives) (*Node, map[string]bool, error) {
 	if rest == "" {
 		return nil, nil, nil
 	}
 
-	child, err := newNodeFromLine(rest, d)
+	child, err := newNodeFromLine(rest, d, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -50,7 +50,7 @@ func parseSubCommand(rest string, d *Directive) (*Node, map[string]bool, error) 
 // helper to parse words (i.e space delimited or quoted strings) in a statement.
 // The quotes are preserved as part of this function and they are stripped later
 // as part of processWords().
-func parseWords(rest string, d *Directive) []string {
+func parseWords(rest string, d *directives) []string {
 	const (
 		inSpaces = iota // looking for start of a word
 		inWord
@@ -59,11 +59,11 @@ func parseWords(rest string, d *Directive) []string {
 
 	words := []string{}
 	phase := inSpaces
-	word := ""
 	quote := '\000'
 	blankOK := false
 	var ch rune
 	var chWidth int
+	var sbuilder strings.Builder
 
 	for pos := 0; pos <= len(rest); pos += chWidth {
 		if pos != len(rest) {
@@ -80,18 +80,18 @@ func parseWords(rest string, d *Directive) []string {
 			phase = inWord // found it, fall through
 		}
 		if (phase == inWord || phase == inQuote) && (pos == len(rest)) {
-			if blankOK || len(word) > 0 {
-				words = append(words, word)
+			if blankOK || sbuilder.Len() > 0 {
+				words = append(words, sbuilder.String())
 			}
 			break
 		}
 		if phase == inWord {
 			if unicode.IsSpace(ch) {
 				phase = inSpaces
-				if blankOK || len(word) > 0 {
-					words = append(words, word)
+				if blankOK || sbuilder.Len() > 0 {
+					words = append(words, sbuilder.String())
 				}
-				word = ""
+				sbuilder.Reset()
 				blankOK = false
 				continue
 			}
@@ -107,11 +107,11 @@ func parseWords(rest string, d *Directive) []string {
 				// If we're not quoted and we see an escape token, then always just
 				// add the escape token plus the char to the word, even if the char
 				// is a quote.
-				word += string(ch)
+				sbuilder.WriteRune(ch)
 				pos += chWidth
 				ch, chWidth = utf8.DecodeRuneInString(rest[pos:])
 			}
-			word += string(ch)
+			sbuilder.WriteRune(ch)
 			continue
 		}
 		if phase == inQuote {
@@ -125,10 +125,10 @@ func parseWords(rest string, d *Directive) []string {
 					continue // just skip the escape token at end
 				}
 				pos += chWidth
-				word += string(ch)
+				sbuilder.WriteRune(ch)
 				ch, chWidth = utf8.DecodeRuneInString(rest[pos:])
 			}
-			word += string(ch)
+			sbuilder.WriteRune(ch)
 		}
 	}
 
@@ -137,7 +137,7 @@ func parseWords(rest string, d *Directive) []string {
 
 // parse environment like statements. Note that this does *not* handle
 // variable interpolation, which will be handled in the evaluator.
-func parseNameVal(rest string, key string, d *Directive) (*Node, error) {
+func parseNameVal(rest string, key string, d *directives) (*Node, error) {
 	// This is kind of tricky because we need to support the old
 	// variant:   KEY name value
 	// as well as the new one:    KEY name=value ...
@@ -151,32 +151,35 @@ func parseNameVal(rest string, key string, d *Directive) (*Node, error) {
 
 	// Old format (KEY name value)
 	if !strings.Contains(words[0], "=") {
-		parts := tokenWhitespace.Split(rest, 2)
+		parts := reWhitespace.Split(rest, 2)
 		if len(parts) < 2 {
-			return nil, fmt.Errorf(key + " must have two arguments")
+			return nil, errors.Errorf("%s must have two arguments", key)
 		}
-		return newKeyValueNode(parts[0], parts[1]), nil
+		return newKeyValueNode(parts[0], parts[1], ""), nil
 	}
 
 	var rootNode *Node
 	var prevNode *Node
 	for _, word := range words {
 		if !strings.Contains(word, "=") {
-			return nil, fmt.Errorf("Syntax error - can't find = in %q. Must be of the form: name=value", word)
+			return nil, errors.Errorf("Syntax error - can't find = in %q. Must be of the form: name=value", word)
 		}
 
 		parts := strings.SplitN(word, "=", 2)
-		node := newKeyValueNode(parts[0], parts[1])
+		node := newKeyValueNode(parts[0], parts[1], "=")
 		rootNode, prevNode = appendKeyValueNode(node, rootNode, prevNode)
 	}
 
 	return rootNode, nil
 }
 
-func newKeyValueNode(key, value string) *Node {
+func newKeyValueNode(key, value, sep string) *Node {
 	return &Node{
 		Value: key,
-		Next:  &Node{Value: value},
+		Next: &Node{
+			Value: value,
+			Next:  &Node{Value: sep},
+		},
 	}
 }
 
@@ -188,16 +191,18 @@ func appendKeyValueNode(node, rootNode, prevNode *Node) (*Node, *Node) {
 		prevNode.Next = node
 	}
 
-	prevNode = node.Next
+	for prevNode = node.Next; prevNode.Next != nil; {
+		prevNode = prevNode.Next
+	}
 	return rootNode, prevNode
 }
 
-func parseEnv(rest string, d *Directive) (*Node, map[string]bool, error) {
+func parseEnv(rest string, d *directives) (*Node, map[string]bool, error) {
 	node, err := parseNameVal(rest, "ENV", d)
 	return node, nil, err
 }
 
-func parseLabel(rest string, d *Directive) (*Node, map[string]bool, error) {
+func parseLabel(rest string, d *directives) (*Node, map[string]bool, error) {
 	node, err := parseNameVal(rest, commandLabel, d)
 	return node, nil, err
 }
@@ -210,7 +215,7 @@ func parseLabel(rest string, d *Directive) (*Node, map[string]bool, error) {
 // In addition, a keyword definition alone is of the form `keyword` like `name1`
 // above. And the assignments `name2=` and `name3=""` are equivalent and
 // assign an empty value to the respective keywords.
-func parseNameOrNameVal(rest string, d *Directive) (*Node, map[string]bool, error) {
+func parseNameOrNameVal(rest string, d *directives) (*Node, map[string]bool, error) {
 	words := parseWords(rest, d)
 	if len(words) == 0 {
 		return nil, nil, nil
@@ -236,7 +241,7 @@ func parseNameOrNameVal(rest string, d *Directive) (*Node, map[string]bool, erro
 
 // parses a whitespace-delimited set of arguments. The result is effectively a
 // linked list of string arguments.
-func parseStringsWhitespaceDelimited(rest string, d *Directive) (*Node, map[string]bool, error) {
+func parseStringsWhitespaceDelimited(rest string, d *directives) (*Node, map[string]bool, error) {
 	if rest == "" {
 		return nil, nil, nil
 	}
@@ -244,7 +249,7 @@ func parseStringsWhitespaceDelimited(rest string, d *Directive) (*Node, map[stri
 	node := &Node{}
 	rootnode := node
 	prevnode := node
-	for _, str := range tokenWhitespace.Split(rest, -1) { // use regexp
+	for _, str := range reWhitespace.Split(rest, -1) { // use regexp
 		prevnode = node
 		node.Value = str
 		node.Next = &Node{}
@@ -260,7 +265,7 @@ func parseStringsWhitespaceDelimited(rest string, d *Directive) (*Node, map[stri
 }
 
 // parseString just wraps the string in quotes and returns a working node.
-func parseString(rest string, d *Directive) (*Node, map[string]bool, error) {
+func parseString(rest string, d *directives) (*Node, map[string]bool, error) {
 	if rest == "" {
 		return nil, nil, nil
 	}
@@ -270,14 +275,14 @@ func parseString(rest string, d *Directive) (*Node, map[string]bool, error) {
 }
 
 // parseJSON converts JSON arrays to an AST.
-func parseJSON(rest string, d *Directive) (*Node, map[string]bool, error) {
+func parseJSON(rest string) (*Node, map[string]bool, error) {
 	rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
 	if !strings.HasPrefix(rest, "[") {
-		return nil, nil, fmt.Errorf(`Error parsing "%s" as a JSON array`, rest)
+		return nil, nil, errDockerfileNotJSONArray
 	}
 
 	var myJSON []interface{}
-	if err := json.NewDecoder(strings.NewReader(rest)).Decode(&myJSON); err != nil {
+	if err := json.Unmarshal([]byte(rest), &myJSON); err != nil {
 		return nil, nil, err
 	}
 
@@ -303,12 +308,12 @@ func parseJSON(rest string, d *Directive) (*Node, map[string]bool, error) {
 // parseMaybeJSON determines if the argument appears to be a JSON array. If
 // so, passes to parseJSON; if not, quotes the result and returns a single
 // node.
-func parseMaybeJSON(rest string, d *Directive) (*Node, map[string]bool, error) {
+func parseMaybeJSON(rest string, d *directives) (*Node, map[string]bool, error) {
 	if rest == "" {
 		return nil, nil, nil
 	}
 
-	node, attrs, err := parseJSON(rest, d)
+	node, attrs, err := parseJSON(rest)
 
 	if err == nil {
 		return node, attrs, nil
@@ -325,8 +330,8 @@ func parseMaybeJSON(rest string, d *Directive) (*Node, map[string]bool, error) {
 // parseMaybeJSONToList determines if the argument appears to be a JSON array. If
 // so, passes to parseJSON; if not, attempts to parse it as a whitespace
 // delimited string.
-func parseMaybeJSONToList(rest string, d *Directive) (*Node, map[string]bool, error) {
-	node, attrs, err := parseJSON(rest, d)
+func parseMaybeJSONToList(rest string, d *directives) (*Node, map[string]bool, error) {
+	node, attrs, err := parseJSON(rest)
 
 	if err == nil {
 		return node, attrs, nil
@@ -339,7 +344,7 @@ func parseMaybeJSONToList(rest string, d *Directive) (*Node, map[string]bool, er
 }
 
 // The HEALTHCHECK command is like parseMaybeJSON, but has an extra type argument.
-func parseHealthConfig(rest string, d *Directive) (*Node, map[string]bool, error) {
+func parseHealthConfig(rest string, d *directives) (*Node, map[string]bool, error) {
 	// Find end of first argument
 	var sep int
 	for ; sep < len(rest); sep++ {

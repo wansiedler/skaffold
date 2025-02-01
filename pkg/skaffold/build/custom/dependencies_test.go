@@ -21,9 +21,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestGetDependenciesDockerfile(t *testing.T) {
@@ -43,22 +43,25 @@ func TestGetDependenciesDockerfile(t *testing.T) {
 			Dockerfile: &latest.DockerfileDependency{
 				Path: "Dockerfile",
 				BuildArgs: map[string]*string{
-					"file": util.StringPtr("foo"),
+					"file": util.Ptr("foo"),
 				},
 			},
 		},
 	}
 
 	expected := []string{"Dockerfile", filepath.FromSlash("baz/file"), "foo"}
-	deps, err := GetDependencies(context.Background(), tmpDir.Root(), customArtifact, nil)
+	deps, err := GetDependencies(context.Background(), tmpDir.Root(), "test", customArtifact, nil)
 
 	testutil.CheckErrorAndDeepEqual(t, false, err, expected, deps)
 }
 
 func TestGetDependenciesCommand(t *testing.T) {
 	testutil.Run(t, "", func(t *testutil.T) {
-		t.Override(&util.DefaultExecCommand, testutil.CmdRunOut(
+		workspace := "test/workspace"
+
+		t.Override(&util.DefaultExecCommand, testutil.CmdRunDirOut(
 			"echo [\"file1\",\"file2\",\"file3\"]",
+			workspace,
 			"[\"file1\",\"file2\",\"file3\"]",
 		))
 
@@ -69,7 +72,7 @@ func TestGetDependenciesCommand(t *testing.T) {
 		}
 
 		expected := []string{"file1", "file2", "file3"}
-		deps, err := GetDependencies(context.Background(), "", customArtifact, nil)
+		deps, err := GetDependencies(context.Background(), workspace, "test", customArtifact, nil)
 
 		t.CheckNoError(err)
 		t.CheckDeepEqual(expected, deps)
@@ -119,7 +122,7 @@ func TestGetDependenciesPaths(t *testing.T) {
 			tmpDir := t.NewTempDir().
 				Touch("foo", "bar", "baz/file")
 
-			deps, err := GetDependencies(context.Background(), tmpDir.Root(), &latest.CustomArtifact{
+			deps, err := GetDependencies(context.Background(), tmpDir.Root(), "test", &latest.CustomArtifact{
 				Dependencies: &latest.CustomDependencies{
 					Paths:  test.paths,
 					Ignore: test.ignore,

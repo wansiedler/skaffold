@@ -20,7 +20,10 @@ import (
 	"context"
 	"io"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
 )
 
 type cacheDetails interface {
@@ -55,7 +58,7 @@ func (d found) Hash() string {
 }
 
 type needsTagging interface {
-	Tag(context.Context, *cache) error
+	Tag(context.Context, *cache, platform.Resolver) error
 }
 
 // Found locally with wrong tag. Needs retagging
@@ -69,24 +72,25 @@ func (d needsLocalTagging) Hash() string {
 	return d.hash
 }
 
-func (d needsLocalTagging) Tag(ctx context.Context, c *cache) error {
+func (d needsLocalTagging) Tag(ctx context.Context, c *cache, platforms platform.Resolver) error {
 	return c.client.Tag(ctx, d.imageID, d.tag)
 }
 
 // Found remotely with wrong tag. Needs retagging
 type needsRemoteTagging struct {
-	hash   string
-	tag    string
-	digest string
+	hash      string
+	tag       string
+	digest    string
+	platforms []v1.Platform
 }
 
 func (d needsRemoteTagging) Hash() string {
 	return d.hash
 }
 
-func (d needsRemoteTagging) Tag(ctx context.Context, c *cache) error {
+func (d needsRemoteTagging) Tag(ctx context.Context, c *cache, platforms platform.Resolver) error {
 	fqn := d.tag + "@" + d.digest // Tag is not important. We just need the registry and the digest to locate the image.
-	return docker.AddRemoteTag(fqn, d.tag, c.insecureRegistries)
+	return docker.AddRemoteTag(fqn, d.tag, c.cfg, d.platforms)
 }
 
 // Found locally. Needs pushing
@@ -111,8 +115,10 @@ func (d needsPushing) Push(ctx context.Context, out io.Writer, c *cache) error {
 	}
 
 	// Update cache
+	c.cacheMutex.Lock()
 	e := c.artifactCache[d.hash]
 	e.Digest = digest
 	c.artifactCache[d.hash] = e
+	c.cacheMutex.Unlock()
 	return nil
 }

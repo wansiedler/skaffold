@@ -21,8 +21,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/deploy"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/manifest"
 )
 
 const (
@@ -41,10 +42,10 @@ type withNotification struct {
 	deploy.Deployer
 }
 
-func (w withNotification) Deploy(ctx context.Context, out io.Writer, builds []build.Artifact, labellers []deploy.Labeller) *deploy.Result {
-	dr := w.Deployer.Deploy(ctx, out, builds, labellers)
-	if err := dr.GetError(); err != nil {
+func (w withNotification) Deploy(ctx context.Context, out io.Writer, builds []graph.Artifact, l manifest.ManifestListByConfig) error {
+	err := w.Deployer.Deploy(ctx, out, builds, l)
+	if err != nil {
 		fmt.Fprint(out, terminalBell)
 	}
-	return dr
+	return err
 }

@@ -2,25 +2,24 @@ package layer
 
 import (
 	"archive/tar"
+	"fmt"
 	"io"
 
-	"github.com/buildpacks/imgutil"
 	ilayer "github.com/buildpacks/imgutil/layer"
 
-	"github.com/buildpacks/pack/internal/archive"
+	"github.com/buildpacks/pack/pkg/archive"
 )
 
 type WriterFactory struct {
 	os string
 }
 
-func NewWriterFactory(image imgutil.Image) (*WriterFactory, error) {
-	os, err := image.OS()
-	if err != nil {
-		return nil, err
+func NewWriterFactory(imageOS string) (*WriterFactory, error) {
+	if imageOS != "linux" && imageOS != "windows" {
+		return nil, fmt.Errorf("provided image OS '%s' must be either 'linux' or 'windows'", imageOS)
 	}
 
-	return &WriterFactory{os: os}, nil
+	return &WriterFactory{os: imageOS}, nil
 }
 
 func (f *WriterFactory) NewWriter(fileWriter io.Writer) archive.TarWriter {

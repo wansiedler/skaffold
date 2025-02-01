@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Skaffold Authors
+Copyright 2021 The Skaffold Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,117 +21,49 @@ import (
 	"context"
 	"errors"
 	"io"
-	"io/ioutil"
-	"strings"
 	"testing"
 
 	"k8s.io/client-go/tools/clientcmd/api"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubectl"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/client"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/manifest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner/runcontext"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestDeploy(t *testing.T) {
-	expectedOutput := "Waiting for deployments to stabilize..."
 	tests := []struct {
 		description string
 		testBench   *TestBench
-		statusCheck bool
 		shouldErr   bool
-		shouldWait  bool
 	}{
 		{
-			description: "deploy shd perform status check",
-			testBench:   &TestBench{},
-			statusCheck: true,
-			shouldWait:  true,
-		},
-		{
-			description: "deploy shd not perform status check",
+			description: "deploy succeeds",
 			testBench:   &TestBench{},
 		},
 		{
-			description: "deploy shd not perform status check when deployer is in error",
+			description: "deploy fails",
 			testBench:   &TestBench{deployErrors: []error{errors.New("deploy error")}},
 			shouldErr:   true,
-			statusCheck: true,
 		},
 	}
 
-	dummyStatusCheck := func(context.Context, *deploy.DefaultLabeller, *runcontext.RunContext, io.Writer) error {
-		return nil
-	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			t.SetupFakeKubernetesContext(api.Config{CurrentContext: "cluster1"})
-			t.Override(&kubernetes.Client, mockK8sClient)
-			t.Override(&statusCheck, dummyStatusCheck)
+			t.Override(&client.Client, mockK8sClient)
 
-			runner := createRunner(t, test.testBench, nil)
-			runner.runCtx.Opts.StatusCheck = test.statusCheck
+			r := createRunner(t, test.testBench, nil, []*latest.Artifact{{ImageName: "img1"}, {ImageName: "img2"}}, nil)
 			out := new(bytes.Buffer)
 
-			err := runner.Deploy(context.Background(), out, []build.Artifact{
+			err := r.Deploy(context.Background(), out, []graph.Artifact{
 				{ImageName: "img1", Tag: "img1:tag1"},
 				{ImageName: "img2", Tag: "img2:tag2"},
-			})
+			}, manifest.ManifestListByConfig{})
 			t.CheckError(test.shouldErr, err)
-			if strings.Contains(out.String(), expectedOutput) != test.shouldWait {
-				t.Errorf("expected %s to contain %s %t. But found %t", out.String(), expectedOutput, test.shouldWait, !test.shouldWait)
-			}
-		})
-	}
-}
-
-func TestDeployNamespace(t *testing.T) {
-	tests := []struct {
-		description string
-		Namespaces  []string
-		testBench   *TestBench
-		expected    []string
-	}{
-		{
-			description: "deploy shd add all namespaces to run Context",
-			Namespaces:  []string{"test", "test-ns"},
-			testBench:   NewTestBench().WithDeployNamespaces([]string{"test-ns", "test-ns-1"}),
-			expected:    []string{"test", "test-ns", "test-ns-1"},
-		},
-		{
-			description: "deploy without command opts namespace",
-			testBench:   NewTestBench().WithDeployNamespaces([]string{"test-ns", "test-ns-1"}),
-			expected:    []string{"test-ns", "test-ns-1"},
-		},
-		{
-			description: "deploy with no namespaces returned",
-			Namespaces:  []string{"test"},
-			testBench:   &TestBench{},
-			expected:    []string{"test"},
-		},
-	}
-
-	dummyStatusCheck := func(context.Context, *deploy.DefaultLabeller, *runcontext.RunContext, io.Writer) error {
-		return nil
-	}
-	for _, test := range tests {
-		testutil.Run(t, test.description, func(t *testutil.T) {
-			t.SetupFakeKubernetesContext(api.Config{CurrentContext: "cluster1"})
-			t.Override(&kubernetes.Client, mockK8sClient)
-			t.Override(&statusCheck, dummyStatusCheck)
-
-			runner := createRunner(t, test.testBench, nil)
-			runner.runCtx.Namespaces = test.Namespaces
-
-			runner.Deploy(context.Background(), ioutil.Discard, []build.Artifact{
-				{ImageName: "img1", Tag: "img1:tag1"},
-				{ImageName: "img2", Tag: "img2:tag2"},
-			})
-
-			t.CheckDeepEqual(test.expected, runner.runCtx.Namespaces)
 		})
 	}
 }
@@ -146,14 +78,15 @@ func TestSkaffoldDeployRenderOnly(t *testing.T) {
 			KubeContext: "does-not-exist",
 		}
 
+		deployer, err := GetDeployer(context.Background(), runCtx, nil, "", false)
+		t.RequireNoError(err)
 		r := SkaffoldRunner{
-			runCtx:     runCtx,
-			kubectlCLI: kubectl.NewFromRunContext(runCtx),
-			deployer:   getDeployer(runCtx),
+			runCtx:   runCtx,
+			deployer: deployer,
 		}
-		var builds []build.Artifact
+		var builds []graph.Artifact
 
-		err := r.Deploy(context.Background(), ioutil.Discard, builds)
+		err = r.Deploy(context.Background(), io.Discard, builds, manifest.ManifestListByConfig{})
 
 		t.CheckNoError(err)
 	})

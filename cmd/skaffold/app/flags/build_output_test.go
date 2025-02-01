@@ -19,8 +19,8 @@ package flags
 import (
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestNewBuildOutputFlag(t *testing.T) {
@@ -52,7 +52,7 @@ func TestBuildOutputSet(t *testing.T) {
 }`,
 			},
 			expectedBuildOutput: BuildOutput{
-				Builds: []build.Artifact{{
+				Builds: []graph.Artifact{{
 					ImageName: "gcr.io/k8s/test1",
 					Tag:       "sha256@foo",
 				}, {
@@ -107,7 +107,7 @@ func TestBuildOutputSetStdin(t *testing.T) {
 		t.CheckNoError(err)
 
 		t.CheckDeepEqual(BuildOutput{
-			Builds: []build.Artifact{{
+			Builds: []graph.Artifact{{
 				ImageName: "gcr.io/k8s/test1",
 				Tag:       "sha256@foo",
 			}},

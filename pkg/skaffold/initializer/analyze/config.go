@@ -17,11 +17,12 @@ limitations under the License.
 package analyze
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/initializer/errors"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/initializer/errors"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema"
 )
 
 type skaffoldConfigAnalyzer struct {
@@ -31,7 +32,7 @@ type skaffoldConfigAnalyzer struct {
 	targetConfig string
 }
 
-func (a *skaffoldConfigAnalyzer) analyzeFile(filePath string) error {
+func (a *skaffoldConfigAnalyzer) analyzeFile(ctx context.Context, filePath string) error {
 	if !schema.IsSkaffoldConfig(filePath) || a.force || a.analyzeMode {
 		return nil
 	}

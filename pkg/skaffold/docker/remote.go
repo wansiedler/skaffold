@@ -17,55 +17,78 @@ limitations under the License.
 package docker
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
-	"github.com/sirupsen/logrus"
+	specs "github.com/opencontainers/image-spec/specs-go/v1"
 
-	sErrors "github.com/GoogleContainerTools/skaffold/pkg/skaffold/errors"
+	sErrors "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/errors"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
 )
 
 // for testing
 var (
-	getRemoteImageImpl = getRemoteImage
-	RemoteDigest       = getRemoteDigest
+	RemoteDigest = getRemoteDigest
+	remoteImage  = remote.Image
+	remoteIndex  = remote.Index
 )
 
-func AddRemoteTag(src, target string, insecureRegistries map[string]bool) error {
-	logrus.Debugf("attempting to add tag %s to src %s", target, src)
-	img, err := remoteImage(src, insecureRegistries)
-	if err != nil {
-		return fmt.Errorf("getting image: %w", err)
-	}
+func AddRemoteTag(src, target string, cfg Config, platforms []specs.Platform) error {
+	log.Entry(context.TODO()).Debugf("attempting to add tag %s to src %s", target, src)
 
-	targetRef, err := parseReference(target, insecureRegistries, name.WeakValidation)
+	targetRef, err := parseReference(target, cfg, name.WeakValidation)
 	if err != nil {
 		return err
+	}
+
+	if len(platforms) > 1 {
+		index, err := getRemoteIndex(src, cfg)
+		if err != nil {
+			return fmt.Errorf("getting image index: %w", err)
+		}
+		return remote.WriteIndex(targetRef, index, remote.WithAuthFromKeychain(primaryKeychain))
+	}
+
+	var pl v1.Platform
+	if len(platforms) == 1 {
+		pl = util.ConvertToV1Platform(platforms[0])
+	}
+	img, err := getRemoteImage(src, cfg, pl)
+	if err != nil {
+		return fmt.Errorf("getting image: %w", err)
 	}
 
 	return remote.Write(targetRef, img, remote.WithAuthFromKeychain(primaryKeychain))
 }
 
-func getRemoteDigest(identifier string, insecureRegistries map[string]bool) (string, error) {
-	img, err := remoteImage(identifier, insecureRegistries)
+func getRemoteDigest(identifier string, cfg Config, platforms []specs.Platform) (string, error) {
+	idx, err := getRemoteIndex(identifier, cfg)
+	if err == nil {
+		return digest(idx)
+	}
+	if len(platforms) > 1 {
+		return "", fmt.Errorf("cannot fetch remote index for multiple platform image %q: %w", identifier, err)
+	}
+	var pl v1.Platform
+	if len(platforms) == 1 {
+		pl = util.ConvertToV1Platform(platforms[0])
+	}
+	img, err := getRemoteImage(identifier, cfg, pl)
 	if err != nil {
 		return "", fmt.Errorf("getting image: %w", err)
 	}
 
-	h, err := img.Digest()
-	if err != nil {
-		return "", fmt.Errorf("getting digest: %w", err)
-	}
-
-	return h.String(), nil
+	return digest(img)
 }
 
 // RetrieveRemoteConfig retrieves the remote config file for an image
-func RetrieveRemoteConfig(identifier string, insecureRegistries map[string]bool) (*v1.ConfigFile, error) {
-	img, err := remoteImage(identifier, insecureRegistries)
+func RetrieveRemoteConfig(identifier string, cfg Config, platform v1.Platform) (*v1.ConfigFile, error) {
+	img, err := getRemoteImage(identifier, cfg, platform)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +97,7 @@ func RetrieveRemoteConfig(identifier string, insecureRegistries map[string]bool)
 }
 
 // Push pushes the tarball image
-func Push(tarPath, tag string, insecureRegistries map[string]bool) (string, error) {
+func Push(tarPath, tag string, cfg Config, platforms []specs.Platform) (string, error) {
 	t, err := name.NewTag(tag, name.WeakValidation)
 	if err != nil {
 		return "", fmt.Errorf("parsing tag %q: %w", tag, err)
@@ -86,19 +109,34 @@ func Push(tarPath, tag string, insecureRegistries map[string]bool) (string, erro
 	}
 
 	if err := remote.Write(t, i, remote.WithAuthFromKeychain(primaryKeychain)); err != nil {
-		return "", fmt.Errorf("%s %q: %w", sErrors.PushImageErrPrefix, t, err)
+		return "", fmt.Errorf("%s %q: %w", sErrors.PushImageErr, t, err)
 	}
 
-	return getRemoteDigest(tag, insecureRegistries)
+	return getRemoteDigest(tag, cfg, platforms)
 }
 
-func remoteImage(identifier string, insecureRegistries map[string]bool) (v1.Image, error) {
-	ref, err := parseReference(identifier, insecureRegistries)
+func getRemoteImage(identifier string, cfg Config, platform v1.Platform) (v1.Image, error) {
+	ref, err := parseReference(identifier, cfg)
+	if err != nil {
+		return nil, err
+	}
+	options := []remote.Option{
+		remote.WithAuthFromKeychain(primaryKeychain),
+	}
+	if platform.String() != "" {
+		options = append(options, remote.WithPlatform(platform))
+	}
+
+	return remoteImage(ref, options...)
+}
+
+func getRemoteIndex(identifier string, cfg Config) (v1.ImageIndex, error) {
+	ref, err := parseReference(identifier, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	return getRemoteImageImpl(ref)
+	return remoteIndex(ref, remote.WithAuthFromKeychain(primaryKeychain))
 }
 
 // IsInsecure tests if an image is pulled from an insecure registry; default is false
@@ -106,22 +144,31 @@ func IsInsecure(ref name.Reference, insecureRegistries map[string]bool) bool {
 	return insecureRegistries[ref.Context().Registry.Name()]
 }
 
-func getRemoteImage(ref name.Reference) (v1.Image, error) {
-	return remote.Image(ref, remote.WithAuthFromKeychain(primaryKeychain))
-}
-
-func parseReference(s string, insecureRegistries map[string]bool, opts ...name.Option) (name.Reference, error) {
+func parseReference(s string, cfg Config, opts ...name.Option) (name.Reference, error) {
 	ref, err := name.ParseReference(s, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("parsing reference %q: %w", s, err)
 	}
 
-	if IsInsecure(ref, insecureRegistries) {
+	if IsInsecure(ref, cfg.GetInsecureRegistries()) {
 		ref, err = name.ParseReference(s, name.Insecure)
 		if err != nil {
-			logrus.Warnf("error getting insecure registry: %s\nremote references may not be retrieved", err.Error())
+			log.Entry(context.TODO()).Warnf("error getting insecure registry: %s\nremote references may not be retrieved", err.Error())
 		}
 	}
 
 	return ref, nil
+}
+
+type digester interface {
+	Digest() (v1.Hash, error)
+}
+
+func digest(d digester) (string, error) {
+	h, err := d.Digest()
+	if err != nil {
+		return "", remoteDigestGetErr(err)
+	}
+
+	return h.String(), nil
 }

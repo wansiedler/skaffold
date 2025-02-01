@@ -17,12 +17,13 @@ limitations under the License.
 package jib
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestValidate(t *testing.T) {
@@ -137,6 +138,28 @@ BEGIN JIB JSON
 				{BuilderName: PluginName(JibMaven), File: "path/to/pom.xml", Project: "project2"},
 			},
 		},
+		{
+			description:  "jib maven pom.atom single module",
+			path:         "path/to/pom.atom",
+			fileContents: "com.google.cloud.tools:jib-maven-plugin",
+			command:      "mvn jib:_skaffold-init -q --batch-mode",
+			stdout: `BEGIN JIB JSON
+{"image":"image","project":"project"}`,
+			expectedConfig: []ArtifactConfig{
+				{BuilderName: PluginName(JibMaven), File: "path/to/pom.atom", Image: "image", Project: "project"},
+			},
+		},
+		{
+			description:  "jib maven pom.scala single module",
+			path:         "path/to/pom.scala",
+			fileContents: `"com.google.cloud.tools" % "jib-maven-plugin"`,
+			command:      "mvn jib:_skaffold-init -q --batch-mode",
+			stdout: `BEGIN JIB JSON
+{"image":"image","project":"project"}`,
+			expectedConfig: []ArtifactConfig{
+				{BuilderName: PluginName(JibMaven), File: "path/to/pom.scala", Image: "image", Project: "project"},
+			},
+		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
@@ -150,7 +173,7 @@ BEGIN JIB JSON
 				test.stdout,
 			))
 
-			validated := Validate(tmpDir.Path(test.path), test.enableGradle)
+			validated := Validate(context.Background(), tmpDir.Path(test.path), test.enableGradle)
 
 			t.CheckDeepEqual(test.expectedConfig, validated)
 		})
@@ -220,7 +243,7 @@ func TestArtifactType(t *testing.T) {
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			at := test.config.ArtifactType()
+			at := test.config.ArtifactType("ignored") // jib doesn't include file references in its artifacts
 
 			t.CheckDeepEqual(test.expectedType, at)
 		})

@@ -23,7 +23,7 @@ type NoBuilderErr struct{}
 
 func (e NoBuilderErr) ExitCode() int { return 101 }
 func (e NoBuilderErr) Error() string {
-	return "one or more valid builder configuration (Dockerfile or Jib configuration) must be present to build images with skaffold; please provide at least one build config and try again or run `skaffold init --skip-build`"
+	return "one or more valid build configuration must be present to build images with Skaffold; please provide at least one build config and try again, or run `skaffold init --skip-build`"
 }
 
 // NoManifestErr is an error returned by `skaffold init` when no valid Kubernetes manifest is found.
@@ -34,7 +34,7 @@ func (e NoManifestErr) Error() string {
 	return "one or more valid Kubernetes manifests are required to run skaffold"
 }
 
-// PreExistingConfigErr is an error returned by `skaffold init` when a skaffold config file already exists.
+// PreExistingConfigErr is an error returned by `skaffold init` when a Skaffold config file already exists.
 type PreExistingConfigErr struct {
 	Path string
 }
@@ -50,4 +50,12 @@ type BuilderImageAmbiguitiesErr struct{}
 func (e BuilderImageAmbiguitiesErr) ExitCode() int { return 104 }
 func (e BuilderImageAmbiguitiesErr) Error() string {
 	return "unable to automatically resolve builder/image pairs; run `skaffold init` without `--force` to manually resolve ambiguities"
+}
+
+// NoHelmChartsErr is an error returned by `skaffold init` when no valid charts is found.
+type NoHelmChartsErr struct{}
+
+func (e NoHelmChartsErr) ExitCode() int { return 105 }
+func (e NoHelmChartsErr) Error() string {
+	return "one or more valid Helm charts or Kubernetes manifests are required to run Skaffold"
 }

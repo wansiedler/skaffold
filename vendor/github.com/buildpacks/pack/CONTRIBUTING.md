@@ -17,6 +17,8 @@ This repository adheres to the following project policies:
 Aside from the policies above, you may find [DEVELOPMENT.md](DEVELOPMENT.md) to provide specific helpful detail
 to assist you while developing in this repository.
 
+We welcome any and all contributions! The issues we are prioritizing are visible in the repository [milestones](https://github.com/buildpacks/pack/milestones), and we especially welcome contributions to that. One good place to start contributing is in our [documentation](https://github.com/buildpacks/docs/issues), though you are welcome to start in this repository!
+
 #### Preparing for a Pull Request
 
 After making all the changes but before creating a [Pull Request][pull-request-process], you should run
@@ -30,8 +32,9 @@ Running user acceptance on a pull request is just as critical as reviewing the c
 #### Downloading PR binaries
 
 1. On GitHub's Pull Request view, click on the **Checks** tab.
-2. On the top-right, click **Artifacts**.
-3. Click on the zip file for the platform you are running.
+2. On the left panel, click on the **build** step.
+3. On the bottom, there is **Artifacts** section.
+4. Click on the zip file for the platform you are running.
 
 #### Setup
 

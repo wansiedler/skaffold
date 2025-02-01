@@ -22,11 +22,21 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/sirupsen/logrus"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/filemon"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/trigger"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/filemon"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/trigger"
 )
+
+func NewSkaffoldListener(monitor filemon.Monitor, trigger trigger.Trigger, cache graph.SourceDependenciesCache,
+	intentChan <-chan bool) *SkaffoldListener {
+	return &SkaffoldListener{
+		Monitor:                 monitor,
+		Trigger:                 trigger,
+		sourceDependenciesCache: cache,
+		intentChan:              intentChan,
+	}
+}
 
 type Listener interface {
 	WatchForChanges(context.Context, io.Writer, func() error) error
@@ -34,9 +44,10 @@ type Listener interface {
 }
 
 type SkaffoldListener struct {
-	Monitor    filemon.Monitor
-	Trigger    trigger.Trigger
-	intentChan <-chan bool
+	Monitor                 filemon.Monitor
+	Trigger                 trigger.Trigger
+	sourceDependenciesCache graph.SourceDependenciesCache
+	intentChan              <-chan bool
 }
 
 func (l *SkaffoldListener) LogWatchToUser(out io.Writer) {
@@ -77,8 +88,10 @@ func (l *SkaffoldListener) WatchForChanges(ctx context.Context, out io.Writer, d
 }
 
 func (l *SkaffoldListener) do(devLoop func() error) error {
+	// reset the dependencies resolver cache at the start of every dev loop.
+	l.sourceDependenciesCache.Reset()
 	if err := l.Monitor.Run(l.Trigger.Debounce()); err != nil {
-		logrus.Warnf("Ignoring changes: %s", err.Error())
+		log.Entry(context.TODO()).Warnf("Ignoring changes: %s", err.Error())
 		return nil
 	}
 
@@ -88,7 +101,7 @@ func (l *SkaffoldListener) do(devLoop func() error) error {
 		if errors.Is(err, ErrorConfigurationChanged) {
 			return err
 		}
-		logrus.Errorf("error running dev loop: %s", err.Error())
+		log.Entry(context.TODO()).Errorf("error running dev loop: %s", err.Error())
 	}
 
 	return nil

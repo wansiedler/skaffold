@@ -21,10 +21,12 @@ import (
 	"io"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner/runcontext"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestNewCmdDebug(t *testing.T) {
@@ -38,7 +40,6 @@ func TestNewCmdDebug(t *testing.T) {
 
 		t.CheckDeepEqual(true, opts.Tail)
 		t.CheckDeepEqual(false, opts.Force)
-		t.CheckDeepEqual(false, opts.EnableRPC)
 	})
 }
 
@@ -48,8 +49,8 @@ func TestNewCmdDebug(t *testing.T) {
 func TestDebugIndependentFromDev(t *testing.T) {
 	mockRunner := &mockDevRunner{}
 	testutil.Run(t, "DevDebug", func(t *testutil.T) {
-		t.Override(&createRunner, func(config.SkaffoldOptions) (runner.Runner, *latest.SkaffoldConfig, error) {
-			return mockRunner, &latest.SkaffoldConfig{}, nil
+		t.Override(&createRunner, func(context.Context, io.Writer, config.SkaffoldOptions) (runner.Runner, []util.VersionedConfig, *runcontext.RunContext, error) {
+			return mockRunner, []util.VersionedConfig{&latest.SkaffoldConfig{}}, nil, nil
 		})
 		t.Override(&opts, config.SkaffoldOptions{})
 		t.Override(&doDev, func(context.Context, io.Writer) error {

@@ -20,10 +20,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestCLI(t *testing.T) {
@@ -67,13 +65,11 @@ func TestCLI(t *testing.T) {
 				test.expectedCommand,
 			))
 
-			cli := NewFromRunContext(&runcontext.RunContext{
-				Opts: config.SkaffoldOptions{
-					Namespace:  test.namespace,
-					KubeConfig: test.kubeconfig,
-				},
-				KubeContext: kubeContext,
-			})
+			cli := NewCLI(&mockConfig{
+				kubeContext: kubeContext,
+				kubeConfig:  test.kubeconfig,
+				namespace:   test.namespace,
+			}, "")
 			err := cli.Run(context.Background(), nil, nil, "exec", "arg1", "arg2")
 
 			t.CheckNoError(err)
@@ -88,13 +84,11 @@ func TestCLI(t *testing.T) {
 				output,
 			))
 
-			cli := NewFromRunContext(&runcontext.RunContext{
-				Opts: config.SkaffoldOptions{
-					Namespace:  test.namespace,
-					KubeConfig: test.kubeconfig,
-				},
-				KubeContext: kubeContext,
-			})
+			cli := NewCLI(&mockConfig{
+				kubeContext: kubeContext,
+				kubeConfig:  test.kubeconfig,
+				namespace:   test.namespace,
+			}, "")
 			out, err := cli.RunOut(context.Background(), "exec", "arg1", "arg2")
 
 			t.CheckNoError(err)
@@ -110,17 +104,26 @@ func TestCLI(t *testing.T) {
 				output,
 			))
 
-			cli := NewFromRunContext(&runcontext.RunContext{
-				Opts: config.SkaffoldOptions{
-					Namespace:  test.namespace,
-					KubeConfig: test.kubeconfig,
-				},
-				KubeContext: kubeContext,
-			})
+			cli := NewCLI(&mockConfig{
+				kubeContext: kubeContext,
+				kubeConfig:  test.kubeconfig,
+				namespace:   test.namespace,
+			}, "")
 			cmd := cli.CommandWithStrictCancellation(context.Background(), "exec", "arg1", "arg2")
-			out, err := util.RunCmdOut(cmd.Cmd)
+			out, err := util.RunCmdOut(context.Background(), cmd.Cmd)
+
 			t.CheckNoError(err)
 			t.CheckDeepEqual(string(out), output)
 		})
 	}
 }
+
+type mockConfig struct {
+	kubeContext string
+	kubeConfig  string
+	namespace   string
+}
+
+func (c *mockConfig) GetKubeContext() string   { return c.kubeContext }
+func (c *mockConfig) GetKubeConfig() string    { return c.kubeConfig }
+func (c *mockConfig) GetKubeNamespace() string { return c.namespace }

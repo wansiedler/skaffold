@@ -18,11 +18,11 @@ set -e -o pipefail
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BIN=${DIR}/bin
-VERSION=1.27.0
+VERSION=1.62.0
 
 function install_linter() {
   echo "Installing GolangCI-Lint"
-  ${DIR}/install_golint.sh -b ${BIN} v$VERSION
+  ${DIR}/install-golint.sh -b ${BIN} v$VERSION
 }
 
 if ! [ -x "$(command -v ${BIN}/golangci-lint)" ] ; then
@@ -36,10 +36,24 @@ then
   install_linter
 fi
 
-FLAGS=""
+FLAGS="--skip-dirs fs/assets/credits_generated"
 if [[ "${CI}" == "true" ]]; then
-    FLAGS="-v --print-resources-usage"
+    FLAGS="$FLAGS -v --print-resources-usage"
 fi
 
-${BIN}/golangci-lint run ${FLAGS} -c ${DIR}/golangci.yml \
+${BIN}/golangci-lint run ${FLAGS} --exclude=SA1019 --exclude=appendAssign -c ${DIR}/golangci.yml \
     | awk '/out of memory/ || /Timeout exceeded/ {failed = 1}; {print}; END {exit failed}'
+
+
+# Install and run custom linter to detect usage for logrus package.
+# Currently, we can't run private custom linter in golangcl-lint due to abandoned issue
+# https://github.com/golangci/golangci-lint/issues/1276
+if ! [ -x "$(command -v ${BIN}/logrus-analyzer)" ] ; then
+  echo >&2 'Installing custom logrus linter'
+  cd "${DIR}/tools"
+  GO111MODULE=on go build -o ${BIN}/logrus-analyzer logrus_analyzer.go
+  cd -
+fi
+# This analyzer doesn't support any flags currently, so we don't include ${FLAGS}
+${BIN}/logrus-analyzer github.com/GoogleContainerTools/skaffold/v2{/pkg,/cmd,/diag}...
+

@@ -1,4 +1,4 @@
-apiVersion: skaffold/v2beta6
+apiVersion: skaffold/v4beta12
 kind: Config
 build:
   artifacts:
@@ -27,5 +27,15 @@ profiles:
   build:
     tagPolicy:
       envTemplate:
-        template: "{{.IMAGE_NAME}}:tag"
+        template: "tag"
 - name: args
+- name: envTemplateCmd
+  build:
+    tagPolicy:
+      envTemplate:
+        template: '{{cmd "bash" "-c" "echo 1.0.0"}}'
+- name: envTemplateDefault
+  build:
+    tagPolicy:
+      envTemplate:
+        template: '{{default "bar" .FOO}}'

@@ -27,12 +27,13 @@ import (
 	"strings"
 
 	lifecycle "github.com/buildpacks/lifecycle/cmd"
-	"github.com/buildpacks/pack"
-	"github.com/buildpacks/pack/project"
+	pack "github.com/buildpacks/pack/pkg/client"
+	packimg "github.com/buildpacks/pack/pkg/image"
+	"github.com/buildpacks/pack/pkg/project"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/misc"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
 )
 
 // For testing
@@ -47,11 +48,12 @@ var images pulledImages
 
 func (b *Builder) build(ctx context.Context, out io.Writer, a *latest.Artifact, tag string) (string, error) {
 	artifact := a.BuildpackArtifact
+	clearCache := artifact.ClearCache
 	workspace := a.Workspace
 
 	// Read `project.toml` if it exists.
 	path := filepath.Join(workspace, artifact.ProjectDescriptor)
-	projectDescriptor, err := project.ReadProjectDescriptor(path)
+	projectDescriptor, err := project.ReadProjectDescriptor(path, NewLogger(out))
 	if err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("failed to read project descriptor %q: %w", path, err)
 	}
@@ -65,19 +67,16 @@ func (b *Builder) build(ctx context.Context, out io.Writer, a *latest.Artifact, 
 	}
 	latest := parsed.BaseName + ":latest"
 
-	// Eveluate Env Vars.
-	envVars, err := misc.EvaluateEnv(artifact.Env)
+	// Evaluate Env Vars replacing those in project.toml.
+	env, err := env(a, b.mode, projectDescriptor)
 	if err != nil {
 		return "", fmt.Errorf("unable to evaluate env variables: %w", err)
 	}
+	projectDescriptor.Build.Env = nil
 
-	if b.devMode && a.Sync != nil && a.Sync.Auto != nil {
-		envVars = append(envVars, "GOOGLE_DEVMODE=1")
-	}
-
-	env := envMap(envVars)
-	for _, kv := range projectDescriptor.Build.Env {
-		env[kv.Name] = kv.Value
+	cc, err := containerConfig(artifact)
+	if err != nil {
+		return "", fmt.Errorf("%q: %w", a.ImageName, err)
 	}
 
 	// List buildpacks to be used for the build.
@@ -96,21 +95,22 @@ func (b *Builder) build(ctx context.Context, out io.Writer, a *latest.Artifact, 
 			}
 		}
 	}
+	projectDescriptor.Build.Buildpacks = nil
 
-	// Does the builder image need to be pulled?
-	alreadyPulled := images.AreAlreadyPulled(artifact.Builder, artifact.RunImage)
+	builderImage, runImage, pullPolicy := resolveDependencyImages(artifact, b.artifacts, a.Dependencies, b.pushImages)
 
 	if err := runPackBuildFunc(ctx, out, b.localDocker, pack.BuildOptions{
-		AppPath:      workspace,
-		Builder:      artifact.Builder,
-		RunImage:     artifact.RunImage,
-		Buildpacks:   buildpacks,
-		Env:          env,
-		Image:        latest,
-		NoPull:       alreadyPulled,
-		TrustBuilder: artifact.TrustBuilder,
-		// TODO(dgageot): Support project.toml include/exclude.
-		// FileFilter: func(string) bool { return true },
+		AppPath:           workspace,
+		Builder:           builderImage,
+		RunImage:          runImage,
+		Buildpacks:        buildpacks,
+		Env:               env,
+		Image:             latest,
+		PullPolicy:        pullPolicy,
+		TrustBuilder:      func(_ string) bool { return artifact.TrustBuilder },
+		ClearCache:        clearCache,
+		ContainerConfig:   cc,
+		ProjectDescriptor: projectDescriptor,
 	}); err != nil {
 		return "", err
 	}
@@ -152,17 +152,16 @@ func rewriteLifecycleStatusCode(lce error) error {
 
 func mapLifecycleStatusCode(code int) string {
 	switch code {
-	case lifecycle.CodeInvalidArgs:
+	case lifecycle.CodeForFailed:
+		return "buildpacks lifecycle failed"
+	case lifecycle.CodeForInvalidArgs:
 		return "lifecycle reported invalid arguments"
-	case lifecycle.CodeFailedDetect:
-		return "buildpacks could not determine application type"
-	case lifecycle.CodeFailedBuild:
-		return "buildpacks failed to build"
-	case lifecycle.CodeFailedSave:
-		return "buildpacks failed to save image"
-	case lifecycle.CodeIncompatible:
-		return "incompatible lifecycle version"
+	case lifecycle.CodeForIncompatiblePlatformAPI:
+		return "incompatible version of Platform API"
+	case lifecycle.CodeForIncompatibleBuildpackAPI:
+		return "incompatible version of Buildpacks API"
 	default:
+		// we should never see CodeRebaseError or CodeLaunchError
 		return fmt.Sprintf("lifecycle failed with status code %d", code)
 	}
 }
@@ -176,4 +175,77 @@ func envMap(env []string) map[string]string {
 	}
 
 	return kv
+}
+
+// resolveDependencyImages replaces the provided builder and run images with built images from the required artifacts if specified.
+// The return values are builder image, run image, and if remote pull is required.
+func resolveDependencyImages(artifact *latest.BuildpackArtifact, r ArtifactResolver, deps []*latest.ArtifactDependency, pushImages bool) (string, string, packimg.PullPolicy) {
+	builderImage, runImage := artifact.Builder, artifact.RunImage
+	builderImageLocal, runImageLocal := false, false
+
+	// We mimic pack's behaviour and always pull the images on first build
+	// (tracked via images.AreAlreadyPulled()), but we never pull on
+	// subsequent builds.  And if either the builder or run image are
+	// dependent images then we do not pull and use PullIfNecessary.
+	pullPolicy := packimg.PullAlways
+
+	var found bool
+	for _, d := range deps {
+		if builderImage == d.Alias {
+			builderImage, found = r.GetImageTag(d.ImageName)
+			if !found {
+				log.Entry(context.TODO()).Fatalf("failed to resolve build result for required artifact %q", d.ImageName)
+			}
+			builderImageLocal = true
+		}
+		if runImage == d.Alias {
+			runImage, found = r.GetImageTag(d.ImageName)
+			if !found {
+				log.Entry(context.TODO()).Fatalf("failed to resolve build result for required artifact %q", d.ImageName)
+			}
+			runImageLocal = true
+		}
+	}
+
+	if builderImageLocal && runImageLocal {
+		// if both builder and run image are built locally, there's nothing to pull.
+		pullPolicy = packimg.PullNever
+	} else if builderImageLocal || runImageLocal {
+		// if only one of builder or run image is built locally, we can enable remote image pull only if that image is also pushed to remote.
+		pullPolicy = packimg.PullIfNotPresent
+
+		// if remote image pull is disabled then the image that is not fetched from the required artifacts might not be latest.
+		if !pushImages && builderImageLocal {
+			log.Entry(context.TODO()).Warn("Disabled remote image pull since builder image is built locally. Buildpacks run image may not be latest.")
+		}
+		if !pushImages && runImageLocal {
+			log.Entry(context.TODO()).Warn("Disabled remote image pull since run image is built locally. Buildpacks builder image may not be latest.")
+		}
+	}
+
+	// if remote pull is enabled ensure that same images aren't pulled twice.
+	if pullPolicy == packimg.PullAlways && images.AreAlreadyPulled(builderImage, runImage) {
+		pullPolicy = packimg.PullNever
+	}
+
+	return builderImage, runImage, pullPolicy
+}
+
+func containerConfig(artifact *latest.BuildpackArtifact) (pack.ContainerConfig, error) {
+	var vols []string
+	for _, v := range artifact.Volumes {
+		if v.Host == "" || v.Target == "" {
+			// in case these slip by the JSON schema
+			return pack.ContainerConfig{}, errors.New("buildpacks volumes must have both host and target")
+		}
+		var spec string
+		if v.Options == "" {
+			spec = fmt.Sprintf("%s:%s", v.Host, v.Target)
+		} else {
+			spec = fmt.Sprintf("%s:%s:%s", v.Host, v.Target, v.Options)
+		}
+		vols = append(vols, spec)
+	}
+
+	return pack.ContainerConfig{Volumes: vols}, nil
 }

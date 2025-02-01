@@ -24,12 +24,12 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/walk"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/walk"
 )
 
 var (
@@ -41,18 +41,18 @@ var (
 func NewCmdFindConfigs() *cobra.Command {
 	return NewCmd("find-configs").
 		WithDescription("Find in a given directory all skaffold yamls files that are parseable or upgradeable with their versions.").
-		WithFlags(func(f *pflag.FlagSet) {
+		WithFlags([]*Flag{
 			// Default to current directory
-			f.StringVarP(&directory, "directory", "d", ".", "Root directory to lookup the config files.")
+			{Value: &directory, Name: "directory", Shorthand: "d", DefValue: ".", Usage: "Root directory to lookup the config files."},
 			// Output format of this Command
-			f.StringVarP(&format, "output", "o", "table", "Result format, default to table. [(-o|--output=)json|table]")
+			{Value: &format, Name: "output", Shorthand: "o", DefValue: "table", Usage: "Result format, default to table. [(-o|--output=)json|table]"},
 		}).
 		Hidden().
 		NoArgs(doFindConfigs)
 }
 
-func doFindConfigs(_ context.Context, out io.Writer) error {
-	pathToVersion, err := findConfigs(directory)
+func doFindConfigs(ctx context.Context, out io.Writer) error {
+	pathToVersion, err := findConfigs(ctx, directory)
 	if err != nil {
 		return err
 	}
@@ -66,9 +66,9 @@ func doFindConfigs(_ context.Context, out io.Writer) error {
 	case "table":
 		pathOutLen, versionOutLen := 70, 30
 		for p, v := range pathToVersion {
-			c := color.Default
+			c := output.Default
 			if v != latest.Version {
-				c = color.Green
+				c = output.Green
 			}
 			c.Fprintf(out, fmt.Sprintf("%%-%ds\t%%-%ds\n", pathOutLen, versionOutLen), p, v)
 		}
@@ -80,7 +80,7 @@ func doFindConfigs(_ context.Context, out io.Writer) error {
 	}
 }
 
-func findConfigs(directory string) (map[string]string, error) {
+func findConfigs(ctx context.Context, directory string) (map[string]string, error) {
 	pathToVersion := make(map[string]string)
 
 	// Find files ending in ".yaml" and parseable to skaffold config in the specified root directory recursively.
@@ -89,8 +89,18 @@ func findConfigs(directory string) (map[string]string, error) {
 	}
 
 	err := walk.From(directory).When(isYaml).Do(func(path string, _ walk.Dirent) error {
-		if cfg, err := schema.ParseConfig(path); err == nil {
-			pathToVersion[path] = cfg.GetVersion()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		cfgs, err := schema.ParseConfig(path)
+		switch {
+		case err != nil:
+			log.Entry(ctx).Debugf("skipped %q: error: %v", path, err)
+		case len(cfgs) == 0:
+			log.Entry(ctx).Debugf("skipped %q: no configs found", path)
+		default:
+			// all configs defined in the same file should have the same version
+			pathToVersion[path] = cfgs[0].GetVersion()
 		}
 		return nil
 	})

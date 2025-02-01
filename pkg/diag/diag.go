@@ -23,7 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/diag/validator"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/diag/validator"
 )
 
 type Diagnose interface {
@@ -39,14 +39,8 @@ type diag struct {
 }
 
 func New(namespaces []string) Diagnose {
-	var ns []string
-	for _, n := range namespaces {
-		if n != "" {
-			ns = append(ns, n)
-		}
-	}
 	return &diag{
-		namespaces: ns,
+		namespaces: namespaces,
 		labels:     map[string]string{},
 	}
 }

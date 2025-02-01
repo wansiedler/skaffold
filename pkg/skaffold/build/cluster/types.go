@@ -22,45 +22,66 @@ import (
 	"io"
 	"time"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubectl"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/docker"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubectl"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/platform"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
 )
 
 // Builder builds docker artifacts on Kubernetes.
 type Builder struct {
 	*latest.ClusterDetails
 
-	kubectlcli         *kubectl.CLI
-	kubeContext        string
-	timeout            time.Duration
-	insecureRegistries map[string]bool
+	cfg           Config
+	kubectlcli    *kubectl.CLI
+	mode          config.RunMode
+	timeout       time.Duration
+	artifactStore build.ArtifactStore
+	teardownFunc  []func()
+	skipTests     bool
+}
+
+type Config interface {
+	kubectl.Config
+	docker.Config
+
+	GetKubeContext() string
+	Muted() config.Muted
+	Mode() config.RunMode
+	SkipTests() bool
+}
+
+type BuilderContext interface {
+	Config
+	ArtifactStore() build.ArtifactStore
 }
 
 // NewBuilder creates a new Builder that builds artifacts on cluster.
-func NewBuilder(runCtx *runcontext.RunContext) (*Builder, error) {
-	timeout, err := time.ParseDuration(runCtx.Cfg.Build.Cluster.Timeout)
+func NewBuilder(bCtx BuilderContext, buildCfg *latest.ClusterDetails) (*Builder, error) {
+	timeout, err := time.ParseDuration(buildCfg.Timeout)
 	if err != nil {
 		return nil, fmt.Errorf("parsing timeout: %w", err)
 	}
 
 	return &Builder{
-		ClusterDetails:     runCtx.Cfg.Build.Cluster,
-		kubectlcli:         kubectl.NewFromRunContext(runCtx),
-		timeout:            timeout,
-		kubeContext:        runCtx.KubeContext,
-		insecureRegistries: runCtx.InsecureRegistries,
+		ClusterDetails: buildCfg,
+		cfg:            bCtx,
+		kubectlcli:     kubectl.NewCLI(bCtx, ""),
+		mode:           bCtx.Mode(),
+		timeout:        timeout,
+		artifactStore:  bCtx.ArtifactStore(),
+		skipTests:      bCtx.SkipTests(),
 	}, nil
-}
-
-// Labels are labels specific to cluster builder.
-func (b *Builder) Labels() map[string]string {
-	return map[string]string{
-		constants.Labels.Builder: "cluster",
-	}
 }
 
 func (b *Builder) Prune(ctx context.Context, out io.Writer) error {
 	return nil
+}
+
+func (b *Builder) PushImages() bool { return true }
+
+func (b *Builder) SupportedPlatforms() platform.Matcher {
+	return platform.All
 }

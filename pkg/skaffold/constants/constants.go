@@ -17,14 +17,24 @@ limitations under the License.
 package constants
 
 import (
-	"github.com/sirupsen/logrus"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
 )
 
 const (
-	// DefaultLogLevel is the default global verbosity
-	DefaultLogLevel = logrus.WarnLevel
+	// These are phases in Skaffold
+	DevLoop     = Phase("DevLoop")
+	Init        = Phase("Init")
+	Build       = Phase("Build")
+	Test        = Phase("Test")
+	Render      = Phase("Render")
+	Deploy      = Phase("Deploy")
+	Verify      = Phase("Verify")
+	StatusCheck = Phase("StatusCheck")
+	PortForward = Phase("PortForward")
+	Sync        = Phase("Sync")
+	DevInit     = Phase("DevInit")
+	Exec        = Phase("Exec")
+	Cleanup     = Phase("Cleanup")
 
 	// DefaultDockerfilePath is the dockerfile path is given relative to the
 	// context directory
@@ -39,38 +49,40 @@ const (
 
 	DefaultKustomizationPath = "."
 
-	DefaultKanikoImage                  = "gcr.io/kaniko-project/executor:v0.20.0@sha256:f9a4a760166682c7c7aeda3cc263570682e00848ab47737ed8ffcc3abd2da6c3"
-	DefaultKanikoSecretName             = "kaniko-secret"
-	DefaultKanikoTimeout                = "20m"
-	DefaultKanikoContainerName          = "kaniko"
-	DefaultKanikoEmptyDirName           = "kaniko-emptydir"
-	DefaultKanikoEmptyDirMountPath      = "/kaniko/buildcontext"
-	DefaultKanikoCacheDirName           = "kaniko-cache"
-	DefaultKanikoCacheDirMountPath      = "/cache"
-	DefaultKanikoDockerConfigSecretName = "docker-cfg"
-	DefaultKanikoDockerConfigPath       = "/kaniko/.docker"
-	DefaultKanikoSecretMountPath        = "/secret"
-
-	DefaultBusyboxImage = "busybox"
+	DefaultBusyboxImage = "gcr.io/k8s-skaffold/skaffold-helpers/busybox"
 
 	// DefaultDebugHelpersRegistry is the default location used for the helper images for `debug`.
-	DefaultDebugHelpersRegistry = "gcr.io/gcp-dev-tools/duct-tape"
-
-	UpdateCheckEnvironmentVariable = "SKAFFOLD_UPDATE_CHECK"
+	DefaultDebugHelpersRegistry = "gcr.io/k8s-skaffold/skaffold-debug-support"
 
 	DefaultSkaffoldDir = ".skaffold"
 	DefaultCacheFile   = "cache"
+	DefaultMetricFile  = "metrics"
 
-	DefaultRPCPort     = 50051
-	DefaultRPCHTTPPort = 50052
+	// SkaffoldEnvFile is the file that is parsed to set environment variables in the process
+	SkaffoldEnvFile = "skaffold.env"
 
-	DefaultPortForwardNamespace = "default"
-	DefaultPortForwardAddress   = "127.0.0.1"
+	DefaultPortForwardAddress = "127.0.0.1"
 
 	DefaultProjectDescriptor = "project.toml"
 
+	DefaultBuildpacksBuilderImage = "gcr.io/buildpacks/builder:v1"
+
 	LeeroyAppResponse = "leeroooooy app!!\n"
+
+	GithubIssueLink = "https://github.com/GoogleContainerTools/skaffold/issues/new"
+
+	Windows = "windows"
+
+	DefaultHydrationDir = ".kpt-pipeline"
+	// HaTS is the HaTS Survey ID
+	HaTS = "hats"
+
+	// SubtaskIDNone is the value used for Event API messages when there is no
+	// corresponding subtask
+	SubtaskIDNone = "-1"
 )
+
+type Phase string
 
 var (
 	Pod     latest.ResourceType = "pod"
@@ -80,9 +92,6 @@ var (
 )
 
 var (
-	// DeprecatedImages is an environment variable key, whose value is an array of fully qualified image names passed in to a custom build script.
-	DeprecatedImages = "IMAGES"
-
 	// Image is an environment variable key, whose value is the fully qualified image name passed in to a custom build script.
 	Image = "IMAGE"
 
@@ -91,6 +100,12 @@ var (
 
 	// BuildContext is the absolute path to a directory this artifact is meant to be built from for custom artifacts
 	BuildContext = "BUILD_CONTEXT"
+
+	// SkipTest is Whether to skip the tests after building passing into a custom build script
+	SkipTest = "SKIP_TEST"
+
+	// Platforms is the set of platforms to build the image for.
+	Platforms = "PLATFORMS"
 
 	// KubeContext is the expected kubecontext to build an artifact with a custom build script on cluster
 	KubeContext = "KUBE_CONTEXT"
@@ -106,16 +121,31 @@ var (
 
 	// Timeout is the amount of time an on cluster build is allowed to run.
 	Timeout = "TIMEOUT"
+
+	AllowedUsers = map[string]struct{}{
+		"vsc":          {},
+		"intellij":     {},
+		"gcloud":       {},
+		"cloud-deploy": {},
+	}
+
+	AllowedUserPattern = `^%v(\/.+)?$`
+
+	KustomizeFilePaths = []string{"kustomization.yaml", "kustomization.yml", "Kustomization"}
+
+	DefaultKanikoDigestFile = "/dev/termination-log"
 )
 
 var ImageRef = struct {
 	Repo   string
 	Tag    string
 	Digest string
+	Name   string
 }{
 	Repo:   "IMAGE_REPO",
 	Tag:    "IMAGE_TAG",
 	Digest: "IMAGE_DIGEST",
+	Name:   "IMAGE_NAME",
 }
 var DefaultKubectlManifests = []string{"k8s/*.yaml"}
 
@@ -130,3 +160,12 @@ var Labels = struct {
 	Builder:          "skaffold.dev/builder",
 	DockerAPIVersion: "skaffold.dev/docker-api-version",
 }
+
+const (
+	// RemoteDigestSource skips builds and resolves the digest of images by tag from the remote registry.
+	RemoteDigestSource = "remote"
+	// TagDigestSource to  uses tags directly from the build.
+	TagDigestSource = "tag"
+	// NoneDigestSourceSet uses tags directly from the Kubernetes manifests.
+	NoneDigestSource = "none"
+)

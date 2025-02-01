@@ -21,7 +21,7 @@ import (
 
 	"github.com/blang/semver"
 
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestParseVersion(t *testing.T) {
@@ -57,12 +57,97 @@ func TestParseVersion(t *testing.T) {
 }
 
 func TestUserAgent(t *testing.T) {
-	testutil.Run(t, "", func(t *testutil.T) {
-		t.Override(&platform, "osx")
-		t.Override(&version, "1.0")
+	tests := []struct {
+		description string
+		platform    string
+		version     string
+		expected    string
+	}{
+		{
+			description: "version number specified",
+			platform:    "osx",
+			version:     "1.0",
+			expected:    "skaffold/1.0 (osx)",
+		},
+		{
+			description: "version not number specified",
+			platform:    "osx",
+			expected:    "skaffold (osx)",
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, "", func(t *testutil.T) {
+			t.Override(&platform, test.platform)
+			t.Override(&version, test.version)
 
-		userAgent := UserAgent()
+			userAgent := UserAgent()
 
-		t.CheckDeepEqual("skaffold/osx/1.0", userAgent)
-	})
+			t.CheckDeepEqual(test.expected, userAgent)
+		})
+	}
+}
+
+func TestUserAgentWithClient(t *testing.T) {
+	tests := []struct {
+		description string
+		platform    string
+		version     string
+		user        string
+		expected    string
+	}{
+		{
+			description: "user in allowed list",
+			platform:    "osx",
+			version:     "1.0",
+			user:        "vsc",
+			expected:    "skaffold/1.0 (osx) vsc",
+		},
+		{
+			description: "user in allowed list",
+			platform:    "osx",
+			version:     "1.0",
+			user:        "cloud-deploy",
+			expected:    "skaffold/1.0 (osx) cloud-deploy",
+		},
+		{
+			description: "user in allowed list with valid pattern",
+			platform:    "osx",
+			version:     "1.0",
+			user:        "cloud-deploy/dev",
+			expected:    "skaffold/1.0 (osx) cloud-deploy/dev",
+		},
+		{
+			description: "user in allowed list with invalid pattern (only slash)",
+			platform:    "osx",
+			version:     "1.0",
+			user:        "cloud-deploy|dev",
+			expected:    "skaffold/1.0 (osx)",
+		},
+		{
+			description: "user in allowed list with invalid pattern (suffix required)",
+			platform:    "osx",
+			version:     "1.0",
+			user:        "cloud-deploy/",
+			expected:    "skaffold/1.0 (osx)",
+		},
+		{
+			description: "user not in allowed list",
+			platform:    "osx",
+			version:     "1.0",
+			user:        "test-user",
+			expected:    "skaffold/1.0 (osx)",
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, "", func(t *testutil.T) {
+			t.Override(&platform, test.platform)
+			t.Override(&version, test.version)
+			t.Override(&client, "")
+			SetClient(test.user)
+
+			userAgent := UserAgentWithClient()
+
+			t.CheckDeepEqual(test.expected, userAgent)
+		})
+	}
 }

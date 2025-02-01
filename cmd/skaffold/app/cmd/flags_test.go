@@ -17,11 +17,13 @@ limitations under the License.
 package cmd
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/spf13/cobra"
 
-	"github.com/GoogleContainerTools/skaffold/testutil"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/v2/testutil"
 )
 
 func TestHasCmdAnnotation(t *testing.T) {
@@ -61,7 +63,7 @@ func TestHasCmdAnnotation(t *testing.T) {
 func TestAddFlagsSmoke(t *testing.T) {
 	// Collect all commands that have common flags.
 	commands := map[string]bool{}
-	for _, fr := range FlagRegistry {
+	for _, fr := range flagRegistry {
 		for _, command := range fr.DefinedOn {
 			commands[command] = true
 		}
@@ -72,6 +74,143 @@ func TestAddFlagsSmoke(t *testing.T) {
 		AddFlags(&cobra.Command{
 			Use:   command,
 			Short: "Test command for smoke testing",
+		})
+	}
+}
+
+func TestMakeFlag(t *testing.T) {
+	var v string
+	f := Flag{
+		Name:          "flag",
+		Shorthand:     "f",
+		Value:         &v,
+		Hidden:        true,
+		FlagAddMethod: "StringVar",
+		DefValue:      "default",
+		DefValuePerCommand: map[string]interface{}{
+			"debug": "dbg",
+			"build": "bld",
+		},
+		NoOptDefVal: "nooptdefval",
+	}
+
+	testutil.Run(t, "just default value", func(t *testutil.T) {
+		test := f.flag("test")
+		t.CheckDeepEqual("flag", test.Name)
+		t.CheckDeepEqual("f", test.Shorthand)
+		t.CheckDeepEqual(true, test.Hidden)
+		t.CheckDeepEqual("default", test.DefValue)
+		t.CheckDeepEqual("nooptdefval", test.NoOptDefVal)
+	})
+
+	testutil.Run(t, "default value for debug", func(t *testutil.T) {
+		debug := f.flag("debug")
+		t.CheckDeepEqual("flag", debug.Name)
+		t.CheckDeepEqual("f", debug.Shorthand)
+		t.CheckDeepEqual(true, debug.Hidden)
+		t.CheckDeepEqual("dbg", debug.DefValue)
+		t.CheckDeepEqual("nooptdefval", debug.NoOptDefVal)
+	})
+
+	testutil.Run(t, "default value for build", func(t *testutil.T) {
+		build := f.flag("build")
+		t.CheckDeepEqual("flag", build.Name)
+		t.CheckDeepEqual("f", build.Shorthand)
+		t.CheckDeepEqual(true, build.Hidden)
+		t.CheckDeepEqual("bld", build.DefValue)
+		t.CheckDeepEqual("nooptdefval", build.NoOptDefVal)
+	})
+}
+
+func TestResetFlagDefaults(t *testing.T) {
+	var v string
+	var sl []string
+	var soru config.StringOrUndefined
+
+	valueFlag := Flag{
+		Name:          "value",
+		Value:         &v,
+		FlagAddMethod: "StringVar",
+		DefValue:      "default",
+		DefValuePerCommand: map[string]interface{}{
+			"debug": "dbg",
+			"build": "bld",
+		},
+		DefinedOn: []string{"build", "debug", "test"},
+	}
+	sliceFlag := Flag{
+		Name:          "slice",
+		Value:         &sl,
+		FlagAddMethod: "StringSliceVar",
+		DefValue:      []string{"default"},
+		DefValuePerCommand: map[string]interface{}{
+			"debug": []string{"dbg", "other"},
+			"build": []string{"bld"},
+		},
+		DefinedOn: []string{"build", "debug", "test"},
+	}
+	varFlag := Flag{
+		Name:          "var",
+		Value:         &soru,
+		FlagAddMethod: "Var",
+		DefValue:      nil,
+		DefValuePerCommand: map[string]interface{}{
+			"debug": "dbg",
+			"build": "bld",
+		},
+		DefinedOn: []string{"build", "debug", "test"},
+	}
+	flagRegistry := []*Flag{&valueFlag, &sliceFlag, &varFlag}
+
+	tests := []struct {
+		command       string
+		expectedValue string
+		expectedSlice []string
+		expectedVar   interface{}
+	}{
+		{"debug", "dbg", []string{"dbg", "other"}, "dbg"},
+		{"test", "default", []string{"default"}, nil},
+		{"build", "bld", []string{"bld"}, "bld"},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.command, func(t *testutil.T) {
+			cmd := cobra.Command{Use: test.command}
+			for _, f := range flagRegistry {
+				cmd.Flags().AddFlag(f.flag(test.command))
+			}
+
+			// ResetFlagDefaults should reset to defaults for the given command
+			v = "randovalue"
+			sl = []string{"rando", "value"}
+			soru.Set("randovalue")
+			ResetFlagDefaults(&cmd, flagRegistry)
+
+			t.CheckDeepEqual(test.expectedValue, v)
+			t.CheckDeepEqual(test.expectedSlice, sl)
+			if test.expectedVar == nil {
+				t.CheckDeepEqual((*string)(nil), soru.Value())
+			} else {
+				t.CheckDeepEqual(soru.String(), test.expectedVar)
+			}
+		})
+	}
+}
+
+func TestAsStringSlice(t *testing.T) {
+	tests := []struct {
+		input    interface{}
+		expected []string
+	}{
+		{"string", []string{"string"}},
+		{0, []string{"0"}},
+		{[]string{"a", "b"}, []string{"a", "b"}},
+		{[]int{0, 1}, []string{"0", "1"}},
+	}
+	for _, test := range tests {
+		testutil.Run(t, fmt.Sprintf("%v", test.expected), func(t *testutil.T) {
+			result := asStringSlice(test.input)
+
+			t.CheckDeepEqual(test.expected, result)
 		})
 	}
 }

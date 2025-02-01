@@ -21,11 +21,12 @@ import (
 	"errors"
 	"io"
 
-	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/output/log"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
 )
 
 // for testing
@@ -36,6 +37,7 @@ func NewCmdDev() *cobra.Command {
 	return NewCmd("dev").
 		WithDescription("Run a pipeline in development mode").
 		WithCommonFlags().
+		WithHouseKeepingMessages().
 		NoArgs(doDev)
 }
 
@@ -59,21 +61,26 @@ func runDev(ctx context.Context, out io.Writer) error {
 		case <-ctx.Done():
 			return nil
 		default:
-			err := withRunner(ctx, func(r runner.Runner, config *latest.SkaffoldConfig) error {
-				err := r.Dev(ctx, out, config.Build.Artifacts)
+			// Note: The latest.SkaffoldConfig is used for both latest schema and latestV2 schema because
+			// the latest and latestV2 use the same Build struct. Ideally they should be separated.
+			err := withRunner(ctx, out, func(r runner.Runner, configs []util.VersionedConfig) error {
+				var artifacts []*latest.Artifact
+				for _, cfg := range configs {
+					artifacts = append(artifacts, cfg.(*latest.SkaffoldConfig).Build.Artifacts...)
+				}
+				err := r.Dev(ctx, out, artifacts)
+				manifestListByConfig := r.DeployManifests()
 
-				if r.HasDeployed() {
-					cleanup = func() {
-						if err := r.Cleanup(context.Background(), out); err != nil {
-							logrus.Warnln("deployer cleanup:", err)
-						}
+				cleanup = func() {
+					if err := r.Cleanup(context.Background(), out, false, manifestListByConfig, opts.Command); err != nil {
+						log.Entry(ctx).Warn("deployer cleanup:", err)
 					}
 				}
 
 				if r.HasBuilt() {
 					prune = func() {
 						if err := r.Prune(context.Background(), out); err != nil {
-							logrus.Warnln("builder cleanup:", err)
+							log.Entry(ctx).Warn("builder cleanup:", err)
 						}
 					}
 				}

@@ -20,62 +20,65 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
-	"github.com/GoogleContainerTools/skaffold/cmd/skaffold/app/flags"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/graph"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/manifest"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner"
+	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
 )
 
 var (
-	showBuild                 bool
-	renderOutputPath          string
-	renderFromBuildOutputFile flags.BuildOutputFileFlag
-	offline                   bool
+	showBuild bool
+	offline   bool
 )
 
 // NewCmdRender describes the CLI command to build artifacts render Kubernetes manifests.
 func NewCmdRender() *cobra.Command {
 	return NewCmd("render").
-		WithDescription("[alpha] Perform all image builds, and output rendered Kubernetes manifests").
+		WithDescription("Generate rendered Kubernetes manifests").
 		WithExample("Hydrate Kubernetes manifests without building the images, using digest resolved from tag in remote registry ", "render --digest-source=remote").
 		WithCommonFlags().
-		WithFlags(func(f *pflag.FlagSet) {
-			f.BoolVar(&showBuild, "loud", false, "Show the build logs and output")
-			f.VarP(&renderFromBuildOutputFile, "build-artifacts", "a", "File containing build result from a previous 'skaffold build --file-output'")
-			f.BoolVar(&offline, "offline", false, `Do not connect to Kubernetes API server for manifest creation and validation. This is helpful when no Kubernetes cluster is available (e.g. GitOps model). No metadata.namespace attribute is injected in this case - the manifest content does not get changed.`)
-			f.StringVar(&renderOutputPath, "output", "", "file to write rendered manifests to")
-			f.StringVar(&opts.DigestSource, "digest-source", "local", "Set to 'local' to build images locally and use digests from built images; Set to 'remote' to resolve the digest of images by tag from the remote registry; Set to 'none' to use tags directly from the Kubernetes manifests")
+		WithFlags([]*Flag{
+			{Value: &showBuild, Name: "loud", DefValue: false, Usage: "Show the build logs and output", IsEnum: true},
+			{Value: &offline, Name: "offline", DefValue: false, Usage: `Do not connect to Kubernetes API server for manifest creation and validation. This is helpful when no Kubernetes cluster is available (e.g. GitOps model). No metadata.namespace attribute is injected in this case - the manifest content does not get changed.`, IsEnum: true},
+			// This "--output" flag replaces the --render-output flag, which is deprecated.
+			{Value: &opts.RenderOutput, Name: "output", Shorthand: "o", DefValue: "", Usage: "File to write rendered manifests to"},
 		}).
+		WithHouseKeepingMessages().
 		NoArgs(doRender)
 }
 
 func doRender(ctx context.Context, out io.Writer) error {
-	buildOut := ioutil.Discard
+	// TODO(nkubala): remove this from opts in favor of a param to Build()
+	opts.RenderOnly = true
+	buildOut := io.Discard
 	if showBuild {
 		buildOut = out
 	}
 
-	return withRunner(ctx, func(r runner.Runner, config *latest.SkaffoldConfig) error {
-		var bRes []build.Artifact
+	return withRunner(ctx, out, func(r runner.Runner, configs []util.VersionedConfig) error {
+		var bRes []graph.Artifact
+		var err error
 
-		if renderFromBuildOutputFile.String() != "" {
-			bRes = renderFromBuildOutputFile.BuildArtifacts()
+		if fromBuildOutputFile.String() != "" || len(preBuiltImages.GetSlice()) > 0 {
+			// pass `nil` as render shouldn't build if provided --build-artifacts or --images
+			bRes, err = getBuildArtifactsAndSetTags(nil, r.ApplyDefaultRepo)
+			if err != nil {
+				return fmt.Errorf("loading artifacts: %w", err)
+			}
 		} else {
-			var err error
-			bRes, err = r.BuildAndTest(ctx, buildOut, targetArtifacts(opts, config))
+			bRes, err = r.Build(ctx, buildOut, targetArtifacts(opts, configs))
 			if err != nil {
 				return fmt.Errorf("executing build: %w", err)
 			}
 		}
 
-		if err := r.Render(ctx, out, bRes, offline, renderOutputPath); err != nil {
+		manifests, err := r.Render(ctx, out, bRes, offline)
+		if err != nil {
 			return fmt.Errorf("rendering manifests: %w", err)
 		}
-		return nil
+		return manifest.Write(manifests.String(), opts.RenderOutput, out)
 	})
 }

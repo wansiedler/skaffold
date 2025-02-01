@@ -1,4 +1,4 @@
-apiVersion: skaffold/v2beta6
+apiVersion: skaffold/v4beta12
 kind: Config
 build:
   artifacts:
@@ -11,51 +11,74 @@ build:
     context: npm
   - image: skaffold-debug-nodejs
     context: nodejs
-  - image: skaffold-debug-python3
-    context: python3
+  #- image: skaffold-debug-python3
+  #  context: python3
   - image: skaffold-debug-go
     context: go
-    docker:
-      buildArgs:
-        GOGCFLAGS: "-gcflags='all=-N -l'"
-
-deploy:
-  kubectl:
-    manifests:
+  #- image: skaffold-debug-netcore
+  #  context: netcore
+manifests:
+  rawYaml:
     - java/k8s/web.yaml
     - nodejs/k8s/pod.yaml
     - npm/k8s/pod.yaml
-    - python3/k8s/pod.yaml
+    #- python3/k8s/pod.yaml
     - go/k8s/pod.yaml
+    #- netcore/k8s/pod.yaml
 
 profiles:
 - name: kustomize
-  deploy:
-      kustomize: {}
-      kubectl: {}
+  patches:
+  - op: remove
+    path: /manifests/rawYaml
+  manifests:
+    kustomize:
+      paths:
+      - "."
 # use GCP Buildpacks to build the individual projects
 - name: buildpacks
   build:
     artifacts:
     - image: skaffold-debug-java
       context: java
-      buildpacks:
-        builder: "gcr.io/buildpacks/builder:v1"
+      buildpacks: {}
     - image: skaffold-debug-npm
       context: npm
-      buildpacks:
-        builder: "gcr.io/buildpacks/builder:v1"
+      buildpacks: {}
     - image: skaffold-debug-nodejs
       context: nodejs
-      buildpacks:
-        builder: "gcr.io/buildpacks/builder:v1"
-    - image: skaffold-debug-python3
-      context: python3
-      buildpacks:
-        builder: "gcr.io/buildpacks/builder:v1"
+      buildpacks: {}
+    #- image: skaffold-debug-python3
+    #  context: python3
+    #  buildpacks:
+    #    builder: "gcr.io/buildpacks/builder:v1"
     - image: skaffold-debug-go
       context: go
       buildpacks:
-        builder: "gcr.io/buildpacks/builder:v1"
         env:
-        - GOOGLE_GCFLAGS="-gcflags='all=-N -l'"
+        - GOOGLE_RUNTIME_VERSION=1.16 # temporarily pin due to issue#6450
+    #- image: skaffold-debug-netcore
+    #  context: netcore
+    #  buildpacks:
+    #    builder: "gcr.io/buildpacks/builder:v1"
+- name: docker
+  patches:
+  - op: remove
+    path: /manifests/rawYaml
+  build:
+    artifacts:
+    - image: skaffold-debug-nodejs
+      context: nodejs
+  deploy:
+    docker:
+      images: [skaffold-debug-nodejs]
+
+- name: specified-runtime
+  build:
+    artifacts:
+    - image: specified-runtime-nodejs
+      context: specified-runtime
+      runtimeType: nodejs
+  manifests:
+    rawYaml:
+      - specified-runtime/k8s/*
